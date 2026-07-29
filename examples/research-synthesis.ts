@@ -2,8 +2,11 @@
  * The full pipeline: retrieve, chunk, rerank, dedupe, cluster, synthesize.
  *
  *   npm run example:synthesis "your research question"
+ *   npm run example:synthesis -- --provider fireworks "your question"
  *
- * Needs EXA_API_KEY, VOXELL_API_KEY, and ANTHROPIC_API_KEY.
+ * Needs EXA_API_KEY and VOXELL_API_KEY, plus a synthesis key: either
+ * ANTHROPIC_API_KEY or FIREWORKS_API_KEY. Whichever is set is used; pass
+ * --provider to choose explicitly when both are.
  *
  * Embeddings are cached to disk, so re-running the same question costs
  * nothing on the Voxell side.
@@ -14,13 +17,29 @@ import {
   FileVectorStore,
   VoxellClient,
   anthropicCompleter,
+  fireworksCompleter,
   researchSearch,
   synthesize,
+  type Completer,
 } from '../src/index.js';
 
+const argv = process.argv.slice(2);
+const providerFlag = argv.indexOf('--provider');
+const requested = providerFlag === -1 ? undefined : argv[providerFlag + 1];
+const words = argv.filter((_, i) => i !== providerFlag && i !== providerFlag + 1);
+
 const query =
-  process.argv.slice(2).join(' ') ||
-  'how are engineering teams evaluating retrieval quality in RAG systems?';
+  words.join(' ') || 'how are engineering teams evaluating retrieval quality in RAG systems?';
+
+function pickCompleter(): { name: string; completer: Completer } {
+  const provider =
+    requested ?? (process.env['ANTHROPIC_API_KEY'] ? 'anthropic' : 'fireworks');
+
+  if (provider === 'anthropic') return { name: 'anthropic', completer: anthropicCompleter() };
+  if (provider === 'fireworks') return { name: 'fireworks', completer: fireworksCompleter() };
+
+  throw new Error(`Unknown --provider "${provider}". Use "anthropic" or "fireworks".`);
+}
 
 const exa = new ExaClient();
 const voxell = new VoxellClient({
@@ -52,10 +71,10 @@ for (const [index, cluster] of (report.clusters ?? []).entries()) {
 }
 
 // --- Synthesis -------------------------------------------------------------
-const synthesis = await synthesize(report, {
-  completer: anthropicCompleter(),
-  maxSources: 10,
-});
+const { name: provider, completer } = pickCompleter();
+console.log(`synthesizing with ${provider}...\n`);
+
+const synthesis = await synthesize(report, { completer, maxSources: 10 });
 
 console.log(`${'-'.repeat(78)}\n`);
 console.log(synthesis.text);

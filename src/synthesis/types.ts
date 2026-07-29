@@ -16,6 +16,8 @@ export interface CompletionResult {
   /** The model that actually produced the text (may differ under fallback). */
   model?: string;
   stopReason?: string;
+  /** Reasoning trace, when the provider exposes one separately from `text`. */
+  reasoning?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
 }
 

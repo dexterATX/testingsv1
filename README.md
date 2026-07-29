@@ -1,11 +1,12 @@
 # research-toolkit
 
-A research tool built from three APIs: **Exa** for broad retrieval, **Voxell**
-embeddings for semantic precision, and **Claude** for grounded synthesis.
+A research tool built from three layers: **Exa** for broad retrieval, **Voxell**
+embeddings for semantic precision, and a pluggable LLM — **Claude** or
+**Fireworks** — for grounded synthesis.
 
 Exa finds candidates. Voxell re-scores every candidate against the actual
 question, collapses restatements of the same story, and groups what survives
-into themes. Claude then writes it up with citations that are *checked*, not
+into themes. The LLM then writes it up with citations that are *checked*, not
 trusted.
 
 ```
@@ -24,23 +25,24 @@ Exa /search ─▶ chunk ─▶ Voxell /v1/embed ─▶ rerank ─▶ dedupe ─
 - **Citation checking** — a synthesis that cites a source that doesn't exist is
   reported, not silently returned
 
-**Dependencies:** the Exa and Voxell clients, the research pipeline, and the
-vector stores have **no runtime dependencies** — just Node 20+ native `fetch`.
-The synthesis module uses the official `@anthropic-ai/sdk`. Nothing else in the
-toolkit imports it, so skipping synthesis means never loading it.
+**Dependencies:** the Exa, Voxell, and Fireworks clients, the research
+pipeline, and the vector stores have **no runtime dependencies** — just Node
+20+ native `fetch`. Only the Anthropic completer pulls in `@anthropic-ai/sdk`
+(its official SDK); the Fireworks path has none.
 
 ## Setup
 
 ```bash
-cp .env.example .env     # fill in EXA_API_KEY, VOXELL_API_KEY, ANTHROPIC_API_KEY
+cp .env.example .env     # EXA_API_KEY, VOXELL_API_KEY, + ANTHROPIC_API_KEY or FIREWORKS_API_KEY
 npm install
-npm run check            # typecheck + 315 tests, no network, no keys needed
+npm run check            # typecheck + 349 tests, no network, no keys needed
 ```
 
 Then a live run:
 
 ```bash
 npm run example:synthesis "how are teams evaluating RAG retrieval quality?"
+npm run example:synthesis -- --provider fireworks "same question, other model"
 ```
 
 The npm scripts load `.env` via Node's native `--env-file-if-exists`, so there
@@ -156,10 +158,12 @@ in:
 const completer: Completer = async ({ system, prompt }) => ({ text: await myModel(system, prompt) });
 ```
 
-`anthropicCompleter()` defaults to `claude-opus-5` at `high` effort and opts
-into **server-side fallbacks**, so a policy-declined request is re-run on a
-fallback model in the same call. It checks `stop_reason` before reading content
-— a refusal is an HTTP 200 with empty content, and would otherwise look like an
+Two completers ship with the toolkit.
+
+**`anthropicCompleter()`** — defaults to `claude-opus-5` at `high` effort and
+opts into **server-side fallbacks**, so a policy-declined request is re-run on a
+fallback model in the same call. It checks `stop_reason` before reading content:
+a refusal is an HTTP 200 with empty content, and would otherwise look like an
 empty answer.
 
 | Option | Default |
@@ -168,6 +172,25 @@ empty answer.
 | `effort` | `high` (`low` … `max`) |
 | `maxTokens` | 16000 |
 | `fallbacks` | `true` |
+
+**`fireworksCompleter()`** — defaults to `accounts/fireworks/models/kimi-k3`.
+It throws on a truncated write-up rather than returning one, because a
+synthesis cut off mid-sentence can leave dangling citations. Pass
+`{ failOnTruncation: false }` to accept partial output.
+
+| Option | Default |
+|---|---|
+| `model` | `accounts/fireworks/models/kimi-k3` |
+| `maxTokens` | 16000 |
+| `failOnTruncation` | `true` |
+| `temperature` / `topP` / `topK` | unset |
+
+Swapping providers changes nothing else — the prompt, the citation checking,
+and the report shape are identical:
+
+```ts
+await synthesize(report, { completer: fireworksCompleter() });
+```
 
 ## Vector stores
 
@@ -251,21 +274,50 @@ VOXELL_LIVE_TEST=1 npm run test:live   # re-verify any time
 > *differently shaped batch* can differ by ~6e-4 per component (cosine
 > ≥0.99998). Irrelevant for ranking; relevant if you planned to hash a vector.
 
+## Fireworks client
+
+OpenAI-compatible chat completions, on the same shared transport as Exa and
+Voxell.
+
+```ts
+const { text, reasoning, usage } = await new FireworksClient().chat([
+  { role: 'user', content: 'Summarize this' },
+]);
+```
+
+Three things about the API shaped this client, all verified live:
+
+- **`max_tokens: 0` returns HTTP 200 with empty content** and
+  `finish_reason: "length"` — a silent empty answer you still pay prompt tokens
+  for. Rejected client-side.
+- **`finish_reason: "length"` means truncation**, so `chat()` throws by default
+  rather than handing back a half-written result nothing downstream can detect.
+- **Reasoning models return `reasoning_content` separately**, and its tokens
+  are billed inside `completion_tokens` — a two-word answer can cost hundreds
+  of tokens. Surfaced as `result.reasoning`.
+
+Model ids are fully qualified (`accounts/fireworks/models/kimi-k3`); a bad one
+is a 404, mapped to `FireworksModelNotFoundError` with a pointer to
+`GET /v1/models`. `chat()` also accepts multimodal content parts for
+vision-capable models.
+
 ## Errors
 
 Each provider has its own hierarchy: `ExaError`, `VoxellError`,
-`SynthesisError`. API errors carry `status`, `requestId`, and the parsed `body`.
+`FireworksError`, `SynthesisError`. API errors carry `status`, `requestId`, and
+the parsed `body`.
 
-| Concern | Exa | Voxell | Retried |
-|---|---|---|---|
-| Rejected client-side | `ExaRequestValidationError` | `VoxellRequestValidationError` | — |
-| 400 | `ExaBadRequestError` | `VoxellBadRequestError` | no |
-| 401 / 403 | `ExaAuthError` | `VoxellAuthError` | no |
-| 413 | — | `VoxellPayloadTooLargeError` | no |
-| 429 | `ExaRateLimitError` | `VoxellRateLimitError` | yes |
-| 5xx | `ExaServerError` | `VoxellServerError` | yes |
-| Network | `ExaConnectionError` | `VoxellConnectionError` | yes |
-| Timeout | `ExaTimeoutError` | `VoxellTimeoutError` | no |
+| Concern | Exa | Voxell | Fireworks | Retried |
+|---|---|---|---|---|
+| Rejected client-side | `ExaRequestValidationError` | `VoxellRequestValidationError` | `FireworksRequestValidationError` | — |
+| 400 | `ExaBadRequestError` | `VoxellBadRequestError` | `FireworksBadRequestError` | no |
+| 401 / 403 | `ExaAuthError` | `VoxellAuthError` | `FireworksAuthError` | no |
+| 404 | — | — | `FireworksModelNotFoundError` | no |
+| 413 | — | `VoxellPayloadTooLargeError` | — | no |
+| 429 | `ExaRateLimitError` | `VoxellRateLimitError` | `FireworksRateLimitError` | yes |
+| 5xx | `ExaServerError` | `VoxellServerError` | `FireworksServerError` | yes |
+| Network | `ExaConnectionError` | `VoxellConnectionError` | `FireworksConnectionError` | yes |
+| Timeout | `ExaTimeoutError` | `VoxellTimeoutError` | `FireworksTimeoutError` | no |
 
 Synthesis adds `SynthesisRefusedError` (the model's safety classifiers declined
 — carries the refusal `category`). Retries use exponential backoff with full
@@ -278,12 +330,13 @@ src/
   http/transport.ts   shared: timeouts, retry, error mapping
   exa/                Exa client, types, validation, SSE
   voxell/             Voxell embeddings client
+  fireworks/          Fireworks chat completions client
   store/              vector stores (memory, file)
   research/           chunk, similarity, rerank, dedupe, cluster, pipeline
-  synthesis/          Completer interface + Anthropic adapter + citation checks
+  synthesis/          Completer interface + Anthropic/Fireworks adapters + citation checks
 test/
-  exa/ voxell/ store/ research/ synthesis/   315 tests — no network, no keys
-  live/                                       45 tests — opt-in, real APIs
+  exa/ voxell/ fireworks/ store/ …           349 tests — no network, no keys
+  live/                                       57 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
 ```
@@ -293,8 +346,8 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (315 tests) |
-| `npm run test:live` | Live API tests — needs `EXA_LIVE_TEST=1` and/or `VOXELL_LIVE_TEST=1` |
+| `npm test` | Offline suite (349 tests) |
+| `npm run test:live` | Live API tests — gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
 | `npm run build` | Compile to `dist/` |
 | `npm run example:synthesis` | **Full pipeline + grounded write-up** |
 | `npm run example:research` | Exa → Voxell rerank and dedupe |
@@ -308,3 +361,4 @@ docs/                 measured API references
 - Exa: <https://exa.ai/docs/reference/search-api-guide-for-coding-agents>
 - Voxell: no public docs — see [docs/voxell-api-reference.md](docs/voxell-api-reference.md)
 - Claude: <https://platform.claude.com/docs>
+- Fireworks: <https://docs.fireworks.ai>

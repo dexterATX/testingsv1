@@ -11,6 +11,9 @@
 export { anthropicCompleter, DEFAULT_SYNTHESIS_MODEL } from './anthropic.js';
 export type { AnthropicCompleterOptions, Effort } from './anthropic.js';
 
+export { fireworksCompleter } from './fireworks.js';
+export type { FireworksCompleterOptions } from './fireworks.js';
+
 export { extractCitationMarkers, synthesize } from './synthesize.js';
 export type { Synthesis, SynthesisSource, SynthesizeOptions } from './synthesize.js';
 

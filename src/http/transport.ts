@@ -95,9 +95,12 @@ export function parseRetryAfter(header: string | null): number | undefined {
 }
 
 function extractRequestId(body: unknown, response: Response): string | undefined {
-  if (typeof body === 'object' && body !== null && 'requestId' in body) {
-    const id = (body as { requestId?: unknown }).requestId;
-    if (typeof id === 'string') return id;
+  if (typeof body === 'object' && body !== null) {
+    // Exa uses `requestId`, Fireworks uses `request_id`.
+    for (const key of ['requestId', 'request_id'] as const) {
+      const id = (body as Record<string, unknown>)[key];
+      if (typeof id === 'string') return id;
+    }
   }
   return response.headers.get('x-request-id') ?? undefined;
 }
