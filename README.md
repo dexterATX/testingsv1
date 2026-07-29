@@ -112,17 +112,32 @@ needed, clones and builds into `/opt/research-toolkit` as an unprivileged
 user, writes the keys to `/etc/research-toolkit.env` (root, mode 600), and
 installs a hardened systemd unit bound to `127.0.0.1`.
 
-It assumes the box is **already doing something**: it never edits a web server
+It assumes the box is **already doing something**. It never edits a web server
 config it did not write, refuses a port that is taken, and every step is
-idempotent. If ports 80/443 already belong to something else it sets the app up
-anyway and tells you how to wire it in, rather than guessing.
+idempotent. When Caddy is already installed it adds one file under
+`conf.d/` — and if that file fails to validate (most likely because the site
+address is already served) it deletes it again and leaves the running config
+untouched, so a failed deploy cannot take a live site down with it.
 
-**It will not put the UI on the internet without a password.** The page has no
-login of its own and the process holds live API keys, so the Caddy site block
-it writes has `basic_auth` in it and the script prints a generated password
-once. If you bypass that and bind the app straight to a public interface,
-anyone who finds the port can spend your API credits — hence the startup
-warning when `HOST` is not localhost.
+| Variable | Default | |
+|---|---|---|
+| `PUBLIC_PORT` | `443` | Use another to sit alongside an existing site rather than collide with it. ACME still validates over port 80, so the certificate is real either way. |
+| `PUBLIC_HOSTNAME` | `hostname -f` | The name on the certificate |
+| `UI_AUTH` | `password` | `none` leaves it open to anyone with the URL |
+| `UI_USER` / `UI_PASSWORD` | `research` / generated | Printed once on success |
+| `APP_PORT` | `4317` | Localhost only; the proxy is the only public listener |
+
+```bash
+# alongside an existing site, on a second port, with a login
+sudo PUBLIC_PORT=8443 bash deploy/hostinger.sh
+```
+
+**The default is a password**, because the page has no login of its own and the
+process holds live API keys: an open URL means every visitor spends them, and
+hostnames on shared provider domains get scanned. `UI_AUTH=none` is a supported
+choice rather than an accident — the script takes it and says plainly what it
+did. The same reasoning drives the startup warning when `HOST` is not
+localhost.
 
 ## The research pipeline
 

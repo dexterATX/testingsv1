@@ -30,6 +30,21 @@ ENV_FILE="${ENV_FILE:-/etc/research-toolkit.env}"
 APP_PORT="${APP_PORT:-4317}"
 SERVICE="research-toolkit"
 
+# Public port for the site. 443 is the default; set another when the box
+# already serves something on 443 and you want this alongside it rather than
+# instead of it.
+PUBLIC_PORT="${PUBLIC_PORT:-443}"
+
+# `password` puts one basic-auth login in front of the UI; `none` leaves it
+# open to anyone with the URL.
+#
+# The default is `password` because the page has no login of its own and this
+# process holds live API keys — an open URL means anyone who finds it can spend
+# them, and hostnames on shared provider domains get port-scanned. `none` is a
+# supported choice, not an accident, and the script says so on the way out.
+UI_AUTH="${UI_AUTH:-password}"
+UI_USER="${UI_USER:-research}"
+
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -71,6 +86,17 @@ http_owner="$(listening_on 80 || true)"
 https_owner="$(listening_on 443 || true)"
 info "port 80:  ${http_owner:-free}"
 info "port 443: ${https_owner:-free}"
+
+if [ "$PUBLIC_PORT" != 443 ]; then
+  public_owner="$(listening_on "$PUBLIC_PORT" || true)"
+  info "port $PUBLIC_PORT: ${public_owner:-free}"
+  [ -z "$public_owner" ] || die "port $PUBLIC_PORT is taken. Re-run with PUBLIC_PORT=<free port>."
+fi
+
+case "$UI_AUTH" in
+  password|none) ;;
+  *) die "UI_AUTH must be 'password' or 'none', got '$UI_AUTH'" ;;
+esac
 
 # Which proxy strategy applies. Decided here, acted on at the end, so the
 # script fails before it has changed anything rather than halfway through.
@@ -314,10 +340,31 @@ curl -fsS -m 10 "http://127.0.0.1:$APP_PORT/api/config" >/dev/null \
 
 say "Public access"
 
-# The UI has no login of its own and the server holds live API keys, so it
-# does not go on the internet naked. A password is not optional here.
 PASSWORD="${UI_PASSWORD:-$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)}"
-UI_USER="${UI_USER:-research}"
+
+# The site address. On a box already serving its root hostname, a distinct
+# port puts this alongside that site instead of colliding with it — Caddy
+# still gets a real certificate, because ACME validation uses port 80.
+if [ "$PUBLIC_PORT" = 443 ]; then
+  SITE_ADDR="$HOSTNAME_FQDN"
+  PUBLIC_URL="https://$HOSTNAME_FQDN/"
+else
+  SITE_ADDR="$HOSTNAME_FQDN:$PUBLIC_PORT"
+  PUBLIC_URL="https://$HOSTNAME_FQDN:$PUBLIC_PORT/"
+fi
+
+# Opens the public port on whichever host firewall is actually in charge.
+# Nothing to do when neither is active — Hostinger KVM boxes ship with no
+# host firewall, and the cloud firewall is a separate thing entirely.
+open_firewall_port() {
+  local port="$1"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow "$port/tcp" >/dev/null 2>&1 && info "opened $port/tcp in ufw"
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$port/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 && info "opened $port/tcp in firewalld"
+  fi
+}
 
 case "$PROXY_MODE" in
   caddy-install|caddy-existing)
@@ -330,19 +377,24 @@ case "$PROXY_MODE" in
         > /etc/apt/sources.list.d/caddy-stable.list
       apt-get update -qq
       apt-get install -y -qq caddy >/dev/null
+    else
+      info "reusing the Caddy already on this box"
     fi
-
-    HASH="$(caddy hash-password --plaintext "$PASSWORD")"
 
     # Its own file under Caddyfile's import glob — the existing Caddyfile is
     # never edited, so nothing already being served can break.
     install -d /etc/caddy/conf.d
+
+    if [ "$UI_AUTH" = password ]; then
+      HASH="$(caddy hash-password --plaintext "$PASSWORD")"
+      AUTH_BLOCK=$'\tbasic_auth {\n\t\t'"$UI_USER $HASH"$'\n\t}\n'
+    else
+      AUTH_BLOCK=''
+    fi
+
     cat > "/etc/caddy/conf.d/$SERVICE.caddy" <<CADDY
-$HOSTNAME_FQDN {
-	basic_auth {
-		$UI_USER $HASH
-	}
-	reverse_proxy 127.0.0.1:$APP_PORT {
+$SITE_ADDR {
+$AUTH_BLOCK	reverse_proxy 127.0.0.1:$APP_PORT {
 		# The pipeline streams over SSE and a deep search can take minutes.
 		flush_interval -1
 		transport http {
@@ -356,10 +408,27 @@ CADDY
       printf '\nimport /etc/caddy/conf.d/*.caddy\n' >> /etc/caddy/Caddyfile
     fi
 
-    caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-      || die "Caddyfile did not validate — /etc/caddy/conf.d/$SERVICE.caddy was written but not loaded"
+    # Validate before reloading, and roll back if it fails. On a box already
+    # serving a live site, loading a broken config is the one failure mode that
+    # costs more than this deploy failing.
+    #
+    # This is also what catches a site address Caddy already serves — that is
+    # an "ambiguous site definition" error, not something to pre-check by
+    # grepping the adapted JSON, which stores host and port separately and so
+    # never matches "host:port".
+    if ! validation="$(caddy validate --config /etc/caddy/Caddyfile 2>&1)"; then
+      rm -f "/etc/caddy/conf.d/$SERVICE.caddy"
+      die "the new Caddy site did not validate, so it has been removed and the
+    running config is untouched. Caddy said:
+
+    $(printf '%s' "$validation" | grep -i error | head -2)
+
+    If that mentions an ambiguous site definition, this box already serves
+    $SITE_ADDR. Re-run with PUBLIC_PORT=<other port>."
+    fi
+
+    open_firewall_port "$PUBLIC_PORT"
     systemctl reload caddy 2>/dev/null || systemctl restart caddy
-    PUBLIC_URL="https://$HOSTNAME_FQDN/"
     ;;
 
   manual)
@@ -382,12 +451,33 @@ cat <<SUMMARY
   code        $APP_DIR  @ $(git -C "$APP_DIR" rev-parse --short HEAD)
 SUMMARY
 
-if [ -n "$PUBLIC_URL" ]; then
+if [ -n "$PUBLIC_URL" ] && [ "$UI_AUTH" = password ]; then
   cat <<SUMMARY
   url         $PUBLIC_URL
   login       $UI_USER / $PASSWORD
 
   Save that password now — it is not stored anywhere in plaintext.
+
+  The certificate is issued on first request, so give the very first load
+  a few seconds.
+SUMMARY
+elif [ -n "$PUBLIC_URL" ]; then
+  cat <<SUMMARY
+  url         $PUBLIC_URL
+  login       none — open to anyone with the URL (UI_AUTH=none)
+
+  The certificate is issued on first request, so give the very first load
+  a few seconds.
+
+  Open means open: every visitor spends your API credits, and this host is
+  on a provider domain that gets scanned. Worth having a spend cap on the
+  keys. To put a password on it later:
+
+      UI_AUTH=password bash $0
+
+  and to watch what it is actually serving:
+
+      journalctl -u caddy -f
 SUMMARY
 else
   cat <<SUMMARY
