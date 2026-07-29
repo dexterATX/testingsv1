@@ -1,0 +1,38 @@
+{
+  "name": "exa-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Typed, dependency-free TypeScript client for the Exa search API",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test",
+    "example:search": "node --import tsx --env-file-if-exists=.env examples/basic-search.ts",
+    "example:structured": "node --import tsx --env-file-if-exists=.env examples/structured-output.ts",
+    "example:contents": "node --import tsx --env-file-if-exists=.env examples/contents-and-answer.ts",
+    "example:stream": "node --import tsx --env-file-if-exists=.env examples/streaming.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

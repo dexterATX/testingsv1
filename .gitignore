@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+
+# Secrets — never commit a real key. Use .env.example as the template.
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+.DS_Store
+.vitest/
