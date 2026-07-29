@@ -1,15 +1,65 @@
 # Voxell API reference
 
-Voxell publishes no public reference documentation — `docs.voxell.ai` does not
-resolve. **Everything below was measured against the live API on 2026-07-29**
-by probing `api.voxell.ai` directly, and is encoded in `src/voxell/`.
+**Voxell now publishes docs at [voxell.ai/docs](https://voxell.ai/docs/)** —
+`docs.voxell.ai` still does not resolve, which is what made an earlier revision
+of this file conclude there were none. Re-checked 2026-07-29.
 
-Because this is measured rather than documented, it can drift without notice.
-`test/live/voxell.live.test.ts` re-checks every claim here:
+Two kinds of claim below, kept apart on purpose:
 
-```bash
-VOXELL_LIVE_TEST=1 npm run test:live
-```
+- **Measured** — probed against `api.voxell.ai` directly. Most of this file.
+  `test/live/voxell.live.test.ts` re-checks every measured claim:
+  `VOXELL_LIVE_TEST=1 npm run test:live`
+- **Documented** — from voxell.ai. Marked *(documented)*. Not independently
+  verified unless a measured note says otherwise.
+
+Where the two disagree, the measurement wins and the disagreement is recorded.
+
+---
+
+## What Voxell is
+
+A GPU-native retrieval stack, not just an embeddings endpoint. Four products
+share `api.voxell.ai`; this toolkit uses only the first.
+
+| Product | What it is | Used here |
+|---|---|---|
+| **Forge** | The embedding API — `/v1/embed`, three tiers | **yes** |
+| **Answers** | Managed RAG: upload documents, get cited answers. Chunking, embedding, HNSW + BM25 hybrid retrieval, and answer generation (Gemini) behind two calls | no |
+| **Spaces** | Hosted question-answering portals over an uploaded corpus | no |
+| **Lux** | Self-hosted real-time cross-device state sync. Unrelated to retrieval | no |
+
+Positioning claims *(documented)*: rank #1 on English MTEB v2 at Borda 75.99,
+independently checkable on the [public
+leaderboard](https://huggingface.co/spaces/mteb/leaderboard); Turbo outscores
+OpenAI's best embedding model; 87 ms P50 end-to-end on owned NVIDIA DGX
+hardware against a stated 300 ms market average. The `x-forge-timing` header
+does corroborate the latency figure — see *Response headers* below.
+
+**Answers overlaps this toolkit, but does not replace it.** Answers reasons
+over a corpus you upload. This tool researches the *live web* via Exa and never
+has a fixed corpus, so the two are complementary rather than alternatives. If
+the goal were ever "ask questions of our own documents", Answers would remove
+most of `src/research/` and `src/synthesis/`.
+
+---
+
+## Pricing *(documented)*
+
+| | |
+|---|---|
+| **Turbo** (1024d) | **Free forever**, no card. Rate-limited, not metered |
+| **Pro** (2560d) | $0.30 / 1M tokens |
+| **Ultra** (4096d) | $0.40 / 1M tokens |
+| **Answers** | 50/month free, then $1.50 / 1,000 |
+| Storage | 60,000 vectors free (~5,000 documents) — a ceiling, not a meter |
+| Ingest | 100M tokens/month free |
+
+Plans buy throughput, not features: Free 100 req/min, Precision ($20) 600,
+Singularity ($200) 5,000, Enterprise ($500) 10,000. Every model is available on
+the free tier, and production use on it is explicitly permitted.
+
+Since this toolkit defaults to `turbo`, **embeddings cost nothing** — the
+binding constraint is requests per minute, not spend.
 
 ---
 
@@ -134,6 +184,30 @@ Practical consequences:
   and do not expect byte-identical results when re-embedding a corpus in
   different batch sizes.
 
+### Response headers
+
+Measured 2026-07-29. An earlier revision of this file said there were no
+rate-limit headers; there are, and they are exposed to browsers via
+`access-control-expose-headers`.
+
+| Header | Example | Notes |
+|---|---|---|
+| `x-ratelimit-limit` | `600` | Requests per minute for this key |
+| `x-ratelimit-remaining` | `599` | Decrements per request |
+| `x-ratelimit-reset` | `1785366035` | Epoch **seconds**, not a duration |
+| `x-forge-timing` | `edge=0ms, grpc=59ms, engine=24ms, total=83ms` | Server-side breakdown; `total` corroborates the 87 ms claim |
+| `x-request-id` | `16bbafc101084ebc` | The transport falls back to this when the body carries no id |
+| `x-backend` | `spark2-grpc` | |
+
+The key in `.env` reports **600/min**, which is the Precision tier rather than
+the free tier's documented 100 — so either the account is on a paid plan or the
+published free-tier figure is stale. Worth knowing before sizing a batch job;
+`x-ratelimit-limit` is the authority, not the pricing page.
+
+At this library's defaults (batch 128, concurrency 4) a 25-result research run
+issues a handful of requests, so the ceiling is nowhere near binding. It would
+matter when embedding a large corpus.
+
 ### Error shapes
 
 | Case | Status | Body |
@@ -203,23 +277,59 @@ without a second lookup.
 
 ---
 
+## Answers — `POST /v1/wield/{corpus}/…`
+
+Not used by this toolkit, recorded because the docs point at the wrong path.
+
+```bash
+# load a document; the corpus is created on first upload
+curl https://api.voxell.ai/v1/wield/handbook/documents \
+  -H "Authorization: Bearer $VOXELL_API_KEY" \
+  -d '{"name":"policy.md","text":"..."}'
+
+# ask
+curl https://api.voxell.ai/v1/wield/handbook/query \
+  -H "Authorization: Bearer $VOXELL_API_KEY" \
+  -d '{"query":"How many vacation days?","mode":"answer"}'
+```
+
+```json
+{ "corpus": "handbook", "mode": "answer", "query": "test",
+  "answer": "No relevant context found in this corpus to answer the question.",
+  "chunks": [] }
+```
+
+Querying an empty corpus returns that string rather than an invented answer,
+which is the right failure mode for grounded retrieval.
+
+**Documentation discrepancy.** The Forge page advertises
+`POST /v1/answers` with `{"space": "...", "q": "..."}`. That path returns the
+dashboard's **HTML**, not JSON, for any body — it is served by the web app, not
+the API. `/v1/wield/{corpus}/query` is the working endpoint, and the shape is
+`query`/`mode`, not `q`/`space`.
+
+---
+
 ## Endpoints that do not exist
 
-Probed and returning 404: `/v1/rerank`, `/health`, `/v1`.
+Probed and returning 404: `/v1/rerank`, `/health`, `/v1`, `/v1/spaces`.
 
 The absence of `/v1/rerank` is why `src/research/` reranks locally with cosine
-similarity rather than delegating it.
+similarity rather than delegating it. Note that Answers *does* rank internally
+(HNSW + BM25 hybrid, *documented*), but only over a corpus you have uploaded —
+there is still no endpoint that reranks arbitrary passages against a query.
 
 ---
 
 ## Not established
 
-Honest gaps — these were not measured, so the client makes no claims about them:
+Honest gaps — the client makes no claims about these:
 
-- **Rate limits.** No `x-ratelimit-*` headers are returned, and no 429 was
-  triggered during probing. The client retries 429s with `Retry-After`
-  handling on the assumption that limits exist.
-- **Pricing.** No cost field in any response.
 - **Maximum batch size.** 512 works; the ceiling was not searched for.
 - **Whether the 32,000-character limit counts UTF-16 units or UTF-8 bytes.**
   The client uses `String.length`, which is conservative for non-ASCII text.
+- **Whether the rate-limit window is fixed or sliding.** `x-ratelimit-reset`
+  advanced by roughly a second between calls rather than sitting at a minute
+  boundary, which suggests sliding, but no burst test was run to confirm.
+- **How `x-ratelimit-limit` relates to plan tier in general.** This key reports
+  600 against a documented free-tier 100; one key is not a sample.
