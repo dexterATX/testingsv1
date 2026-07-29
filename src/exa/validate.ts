@@ -1,16 +1,30 @@
 /**
  * Client-side request validation.
  *
- * Each rule here mirrors a constraint the Exa API documents. Catching them
- * before the request goes out turns a 400 round trip into an immediate,
- * specific error — which matters most for the deep search types, where a
- * wasted call costs seconds.
+ * Two kinds of rule live here, and the distinction matters:
+ *
+ * 1. **API-enforced** — the live API returns a 400. Checking first turns a
+ *    round trip into an immediate, specific error, which matters most for the
+ *    deep search types where a wasted call costs seconds. Verified against the
+ *    live API on 2026-07-29: `people` + `excludeDomains`, `company`/`people` +
+ *    date filters, `numResults` below 1, a non-ISO `userLocation`.
+ *
+ * 2. **Client-side opinions** — the API accepts these and *silently ignores
+ *    them*, which is worse than an error: you pay for a search that quietly
+ *    did not do what you asked. Verified: content fields at the top level of
+ *    `/search` return no content, and every removed parameter below is
+ *    accepted and dropped (as is any unknown key — Exa ignores extras
+ *    wholesale). These are deliberately stricter than the API.
+ *
+ * Rules that were documented but turned out not to be enforced — `company` +
+ * `excludeDomains`, `additionalQueries` outside deep types — have been removed
+ * rather than kept as false rejections.
  */
 
 import { ExaRequestValidationError } from './errors.js';
 import {
-  CATEGORIES_WITHOUT_FILTERS,
-  DEEP_SEARCH_TYPES,
+  CATEGORIES_WITHOUT_DATE_FILTERS,
+  CATEGORIES_WITHOUT_EXCLUDE_DOMAINS,
   SEARCH_TYPES,
   type ContentsOptions,
   type JsonSchema,
@@ -18,7 +32,6 @@ import {
 } from './types.js';
 
 const MAX_DOMAINS = 1200;
-const MAX_RESULTS = 100;
 const MAX_SCHEMA_DEPTH = 2;
 const MAX_SCHEMA_PROPERTIES = 10;
 const MAX_AGE_HOURS_MAX = 720;
@@ -27,8 +40,11 @@ const MAX_SUBPAGES = 100;
 
 /**
  * Parameters that were removed or never existed, mapped to the replacement.
- * These are silently ignored or rejected by the API, so a typo'd migration
- * would otherwise look like it worked while doing nothing.
+ *
+ * The API accepts every one of these and silently drops it (verified — it
+ * ignores unknown keys generally). That is the reason to reject them here: a
+ * half-finished migration would otherwise look like it worked while doing
+ * nothing, and you would pay for the search either way.
  */
 const DEPRECATED_PARAMS: Record<string, string> = {
   useAutoprompt: 'remove it entirely — it is deprecated and does nothing',
@@ -165,7 +181,7 @@ export function assertValidContents(contents: ContentsOptions, path = 'contents'
   }
 }
 
-/** Validates a `/search` request against the documented constraints. */
+/** Validates a `/search` request. See the module header for the two rule kinds. */
 export function assertValidSearchRequest(request: SearchRequest): void {
   const raw = request as unknown as Record<string, unknown>;
 
@@ -181,7 +197,6 @@ export function assertValidSearchRequest(request: SearchRequest): void {
     excludeDomains,
     startPublishedDate,
     endPublishedDate,
-    additionalQueries,
     outputSchema,
     userLocation,
     contents,
@@ -192,13 +207,23 @@ export function assertValidSearchRequest(request: SearchRequest): void {
   }
 
   if (type !== undefined && !SEARCH_TYPES.includes(type)) {
-    fail(`Unknown search type "${type}". Expected one of: ${SEARCH_TYPES.join(', ')}.`);
+    // Stricter than the API on purpose: it accepts some undocumented legacy
+    // values (e.g. "neural") and silently falls back on others, so a typo
+    // would cost a search and return default-ranked results.
+    fail(
+      `Unknown search type "${type}". Expected one of: ${SEARCH_TYPES.join(', ')}. ` +
+        `(This is a client-side allowlist of the documented types; the API also ` +
+        `accepts some undocumented legacy values.)`,
+    );
   }
 
   if (numResults !== undefined) {
     assertInteger(numResults, '`numResults`');
-    if (numResults < 1 || numResults > MAX_RESULTS) {
-      fail(`\`numResults\` must be between 1 and ${MAX_RESULTS}, got ${numResults}.`);
+    // Only the lower bound is a fixed API rule. The ceiling is plan-dependent
+    // — the API answers an over-limit request with "above what your plan
+    // allows", so a hard client-side cap would block higher-tier accounts.
+    if (numResults < 1) {
+      fail(`\`numResults\` must be at least 1, got ${numResults}.`);
     }
   }
 
@@ -211,33 +236,27 @@ export function assertValidSearchRequest(request: SearchRequest): void {
     }
   }
 
-  // The company and people categories reject date filters and excludeDomains
-  // with a 400 rather than ignoring them.
-  if (category && (CATEGORIES_WITHOUT_FILTERS as readonly string[]).includes(category)) {
-    const unsupported = (
-      [
-        ['excludeDomains', excludeDomains],
-        ['startPublishedDate', startPublishedDate],
-        ['endPublishedDate', endPublishedDate],
-      ] as const
-    )
-      .filter(([, value]) => value !== undefined)
-      .map(([name]) => name);
+  // Category filter rules, verified against the live API. The two categories
+  // differ: `people` rejects excludeDomains, `company` accepts it.
+  if (category) {
+    const unsupported: string[] = [];
+
+    if (
+      (CATEGORIES_WITHOUT_EXCLUDE_DOMAINS as readonly string[]).includes(category) &&
+      excludeDomains !== undefined
+    ) {
+      unsupported.push('excludeDomains');
+    }
+
+    if ((CATEGORIES_WITHOUT_DATE_FILTERS as readonly string[]).includes(category)) {
+      if (startPublishedDate !== undefined) unsupported.push('startPublishedDate');
+      if (endPublishedDate !== undefined) unsupported.push('endPublishedDate');
+    }
 
     if (unsupported.length > 0) {
       fail(
         `The "${category}" category does not support ${unsupported.join(', ')} ` +
           `and the API returns a 400. Drop the filter, or use a different category.`,
-      );
-    }
-  }
-
-  if (additionalQueries && additionalQueries.length > 0) {
-    const searchType = type ?? 'auto';
-    if (!(DEEP_SEARCH_TYPES as readonly string[]).includes(searchType)) {
-      fail(
-        `\`additionalQueries\` is only supported on the deep search types ` +
-          `(${DEEP_SEARCH_TYPES.join(', ')}), but type is "${searchType}".`,
       );
     }
   }

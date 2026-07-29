@@ -44,11 +44,13 @@ describe('assertValidSearchRequest', () => {
     );
   });
 
-  it.each([0, 101, 2.5])('rejects numResults=%s', (numResults) => {
+  it.each([0, -1, 2.5])('rejects numResults=%s', (numResults) => {
     expectRejection(() => assertValidSearchRequest({ ...base, numResults }), /numResults/);
   });
 
-  it.each([1, 10, 100])('accepts numResults=%s', (numResults) => {
+  it.each([1, 10, 100, 1000])('accepts numResults=%s', (numResults) => {
+    // No client-side ceiling: the API's limit is plan-dependent and it reports
+    // "above what your plan allows", so capping here would block higher tiers.
     expect(() => assertValidSearchRequest({ ...base, numResults })).not.toThrow();
   });
 
@@ -81,16 +83,21 @@ describe('assertValidSearchRequest', () => {
   });
 
   describe('category filter restrictions', () => {
-    it.each(['company', 'people'] as const)(
-      'rejects excludeDomains with category=%s',
-      (category) => {
-        expectRejection(
-          () =>
-            assertValidSearchRequest({ ...base, category, excludeDomains: ['spam.com'] }),
-          /does not support excludeDomains/,
-        );
-      },
-    );
+    it('rejects excludeDomains with category=people', () => {
+      expectRejection(
+        () =>
+          assertValidSearchRequest({ ...base, category: 'people', excludeDomains: ['spam.com'] }),
+        /does not support excludeDomains/,
+      );
+    });
+
+    it('allows excludeDomains with category=company, which the API accepts', () => {
+      // The docs group company with people here, but the live API returns 200
+      // for company + excludeDomains — rejecting it was a false positive.
+      expect(() =>
+        assertValidSearchRequest({ ...base, category: 'company', excludeDomains: ['spam.com'] }),
+      ).not.toThrow();
+    });
 
     it('rejects date filters with category=company', () => {
       expectRejection(
@@ -118,6 +125,13 @@ describe('assertValidSearchRequest', () => {
       );
     });
 
+    it.each(['company', 'people'] as const)('rejects date filters with category=%s', (category) => {
+      expectRejection(
+        () => assertValidSearchRequest({ ...base, category, endPublishedDate: '2025-01-01' }),
+        /does not support endPublishedDate/,
+      );
+    });
+
     it('allows those filters on other categories', () => {
       expect(() =>
         assertValidSearchRequest({
@@ -131,29 +145,21 @@ describe('assertValidSearchRequest', () => {
   });
 
   describe('additionalQueries', () => {
-    it.each(['deep-lite', 'deep', 'deep-reasoning'] as const)('is allowed on %s', (type) => {
+    // The guide calls this deep-types-only, but the live API accepts it on
+    // every type and it demonstrably changes the result set on `auto`.
+    // Rejecting it blocked a working feature.
+    it.each(['deep-lite', 'deep', 'deep-reasoning', 'auto', 'fast', 'instant'] as const)(
+      'is allowed on %s',
+      (type) => {
+        expect(() =>
+          assertValidSearchRequest({ ...base, type, additionalQueries: ['angle one'] }),
+        ).not.toThrow();
+      },
+    );
+
+    it('is allowed when type is omitted', () => {
       expect(() =>
-        assertValidSearchRequest({ ...base, type, additionalQueries: ['angle one'] }),
-      ).not.toThrow();
-    });
-
-    it.each(['auto', 'fast', 'instant'] as const)('is rejected on %s', (type) => {
-      expectRejection(
-        () => assertValidSearchRequest({ ...base, type, additionalQueries: ['angle one'] }),
-        /only supported on the deep search types/,
-      );
-    });
-
-    it('is rejected when type is omitted, since the default is auto', () => {
-      expectRejection(
-        () => assertValidSearchRequest({ ...base, additionalQueries: ['angle'] }),
-        /but type is "auto"/,
-      );
-    });
-
-    it('ignores an empty additionalQueries array', () => {
-      expect(() =>
-        assertValidSearchRequest({ ...base, type: 'auto', additionalQueries: [] }),
+        assertValidSearchRequest({ ...base, additionalQueries: ['angle'] }),
       ).not.toThrow();
     });
   });

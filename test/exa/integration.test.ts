@@ -185,7 +185,7 @@ describe('search over a real connection', () => {
     const before = received.length;
 
     await expect(
-      client.search('x', { category: 'company', excludeDomains: ['spam.com'] }),
+      client.search('x', { category: 'people', excludeDomains: ['spam.com'] }),
     ).rejects.toThrow(ExaRequestValidationError);
 
     expect(received).toHaveLength(before);

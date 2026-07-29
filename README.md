@@ -15,9 +15,9 @@ Exa /search ─▶ chunk ─▶ Voxell /v1/embed ─▶ rerank ─▶ dedupe ─
 ```
 
 - **Typed clients for all three APIs**, mirroring each wire format exactly
-- **Validates before it sends** — documented (Exa) and measured (Voxell)
-  constraints are checked client-side, so mistakes fail immediately instead of
-  costing a round trip
+- **Validates before it sends** — every rule verified against the live API, not
+  taken from the docs, so mistakes fail immediately instead of costing a round
+  trip *and* nothing valid gets falsely rejected
 - **One shared transport** for Exa and Voxell — timeouts, retry with jitter,
   `Retry-After`, typed errors
 - **Cached embeddings**, in memory or on disk, so a repeat run is free
@@ -34,7 +34,7 @@ toolkit imports it, so skipping synthesis means never loading it.
 ```bash
 cp .env.example .env     # fill in EXA_API_KEY, VOXELL_API_KEY, ANTHROPIC_API_KEY
 npm install
-npm run check            # typecheck + 313 tests, no network, no keys needed
+npm run check            # typecheck + 315 tests, no network, no keys needed
 ```
 
 Then a live run:
@@ -205,8 +205,24 @@ with `excludeDomains` or date filters, `additionalQueries` outside the deep
 types, `outputSchema` depth and property limits, all seven removed parameters,
 and content fields put top-level on `/search` instead of under `contents`.
 
-Full reference — and where Exa's setup guide diverges from its docs — in
-**[docs/exa-api-reference.md](docs/exa-api-reference.md)**.
+**The client follows the live API, not the docs, where they disagree** — and
+they disagree in five places. Three were rules this client originally enforced,
+which meant it rejected requests Exa accepts:
+
+| Docs say | Live API does |
+|---|---|
+| `company` and `people` both reject `excludeDomains` | Only `people` does |
+| `additionalQueries` is deep-types-only | Accepted on every type |
+| `numResults` caps at 100 | The cap is plan-dependent |
+| Response has `searchType` | It has `resolvedSearchType` (+ `searchTime`) |
+| `text.maxCharacters` caps at 10000 | Larger values are fine, not an error |
+
+Full reference, including what the API accepts but silently ignores, in
+**[docs/exa-api-reference.md](docs/exa-api-reference.md)**. Re-verify any time:
+
+```bash
+EXA_LIVE_TEST=1 npm run test:live
+```
 
 ## Voxell client
 
@@ -266,8 +282,8 @@ src/
   research/           chunk, similarity, rerank, dedupe, cluster, pipeline
   synthesis/          Completer interface + Anthropic adapter + citation checks
 test/
-  exa/ voxell/ store/ research/ synthesis/   313 tests — no network, no keys
-  live/                                       27 tests — opt-in, real APIs
+  exa/ voxell/ store/ research/ synthesis/   315 tests — no network, no keys
+  live/                                       45 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
 ```
@@ -277,8 +293,8 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (313 tests) |
-| `npm run test:live` | Live API tests — needs `VOXELL_LIVE_TEST=1` |
+| `npm test` | Offline suite (315 tests) |
+| `npm run test:live` | Live API tests — needs `EXA_LIVE_TEST=1` and/or `VOXELL_LIVE_TEST=1` |
 | `npm run build` | Compile to `dist/` |
 | `npm run example:synthesis` | **Full pipeline + grounded write-up** |
 | `npm run example:research` | Exa → Voxell rerank and dedupe |

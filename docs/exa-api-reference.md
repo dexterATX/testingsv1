@@ -1,9 +1,20 @@
 # Exa API reference
 
-Parameter reference this client encodes, verified against the canonical docs on
-2026-07-29.
+Parameter reference this client encodes, checked against the canonical docs and
+then **verified against the live API** on 2026-07-29.
 
 **Source of truth:** <https://exa.ai/docs/reference/search-api-guide-for-coding-agents>
+
+> ⚠️ **The live API and the docs disagree in several places.** Where they do,
+> this client follows the live API. See
+> [Where the docs and the live API diverge](#where-the-docs-and-the-live-api-diverge)
+> — three of those divergences were rules this client originally enforced,
+> which meant it rejected requests Exa accepts. `test/live/exa.live.test.ts`
+> asserts each one so drift is caught:
+>
+> ```bash
+> EXA_LIVE_TEST=1 npm run test:live
+> ```
 
 > Note: `https://docs.exa.ai/reference/...` 307-redirects to
 > `https://exa.ai/docs/reference/...`. Both work; the latter is canonical.
@@ -21,15 +32,15 @@ Supporting pages:
 |-----------|------|-------|
 | `query` | string | **Required.** Accepts long, semantically rich descriptions. |
 | `type` | string | `auto` (default), `fast`, `instant`, `deep-lite`, `deep`, `deep-reasoning`. |
-| `numResults` | integer | 1–100, default 10. |
+| `numResults` | integer | Minimum 1, default 10. The ceiling is **plan-dependent**, not a fixed 100. |
 | `category` | string | `company`, `people`, `publication`, `news`, `personal site`, `financial report`. |
 | `userLocation` | string | Two-letter ISO country code. |
 | `includeDomains` | string[] | Max 1200 entries. Supports `*.subdomain.com` wildcards. |
-| `excludeDomains` | string[] | Max 1200 entries. **Rejected for `company` / `people`.** |
+| `excludeDomains` | string[] | Max 1200 entries. **Rejected for `people` only** — `company` accepts it, despite the docs. |
 | `startPublishedDate` | string | ISO 8601. **Rejected for `company` / `people`.** |
 | `endPublishedDate` | string | ISO 8601. **Rejected for `company` / `people`.** |
 | `moderation` | boolean | Filters unsafe content. |
-| `additionalQueries` | string[] | Forced query angles. **Deep types only.** |
+| `additionalQueries` | string[] | Forced query angles. Documented as deep-only, but **accepted on every type**. |
 | `systemPrompt` | string | Steers synthesis and search planning. |
 | `outputSchema` | object | JSON Schema for `output.content`. Max depth 2, max 10 properties. |
 | `compliance` | string | Enterprise-only; `"hipaa"`. |
@@ -71,7 +82,8 @@ Supporting pages:
 ```jsonc
 {
   "requestId": "string",
-  "searchType": "string",
+  "resolvedSearchType": "string",   // NOT `searchType` — see divergences below
+  "searchTime": 360.8,              // undocumented; server-side ms
   "results": [{
     "title": "string", "url": "string", "id": "string",
     "publishedDate": "ISO 8601|null", "author": "string|null",
@@ -142,6 +154,48 @@ are result objects (`title`, `url`, `id`, `publishedDate`, `author`, `image`,
 | 5xx | Server error | `ExaServerError` | yes |
 
 ---
+
+## Where the docs and the live API diverge
+
+Every row below was verified twice against the live API on 2026-07-29. The
+first three were rules this client enforced, and enforcing them was a bug: it
+rejected requests Exa accepts.
+
+| # | Docs say | Live API does | Client now |
+|---|---|---|---|
+| 1 | `company` and `people` both reject `excludeDomains` | **Only `people` rejects it.** `company` + `excludeDomains` → 200 | Allows `company` + `excludeDomains` |
+| 2 | `additionalQueries` is deep-types-only | **Accepted on every type**, including `auto` | No longer rejects it |
+| 3 | `numResults` range is 1–100 | Minimum 1 is enforced; the ceiling is **plan-dependent** (`"above what your plan allows"`) | Validates ≥ 1 only, no ceiling |
+| 4 | Response carries `searchType` | Carries **`resolvedSearchType`** (often `""`) plus an undocumented `searchTime` | Types `resolvedSearchType` + `searchTime` |
+| 5 | `text.maxCharacters` range is 1–10000 | Values above 10000 are accepted, not an error — you simply get whatever text exists | Validates ≥ 1 only |
+
+Date filters behave as documented: `company` and `people` both reject
+`startPublishedDate` and `endPublishedDate` with a 400.
+
+### What the API accepts but silently ignores
+
+These do **not** error, which is precisely why the client rejects them — a
+silent no-op on a paid search is worse than an error:
+
+| Passed | Result |
+|---|---|
+| `text` / `highlights` / `summary` at the top level of `/search` | 200, and **no content is returned** |
+| `useAutoprompt`, `livecrawl`, `numSentences`, `tokensNum`, `includeUrls`, … | 200, silently dropped |
+| Any unknown key at all (e.g. `totallyMadeUpParameter`) | 200, silently dropped |
+| `type: "neural"` (an undocumented legacy value) | 200 — but `type: "totally-made-up"` → 400 |
+
+The client's allowlist of search types is therefore **stricter than the API**:
+it rejects undocumented-but-working values like `neural` in exchange for
+catching typos before they cost a search. That is a deliberate client-side
+choice, not an API rule.
+
+### Verified as documented
+
+`/contents` reports per-URL outcomes in `statuses` rather than throwing (a bad
+domain yields `status: "error"` with a `tag`); `/answer` returns prose plus
+citations; `outputSchema` works on non-deep types and returns `output.content`
+with `output.grounding`. Note that grounding `field` paths are coarser than the
+docs example suggests — `"companies"` rather than `"companies[0].name"`.
 
 ## Removed / nonexistent parameters
 

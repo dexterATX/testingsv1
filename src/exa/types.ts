@@ -39,8 +39,23 @@ export const CATEGORIES = [
 export type Category = (typeof CATEGORIES)[number];
 
 /**
- * Categories that reject `excludeDomains`, `startPublishedDate`, and
- * `endPublishedDate` with a 400. See `assertValidSearchRequest`.
+ * Categories that reject the published-date filters with a 400.
+ * Verified against the live API on 2026-07-29.
+ */
+export const CATEGORIES_WITHOUT_DATE_FILTERS = ['company', 'people'] as const;
+
+/**
+ * Categories that reject `excludeDomains` with a 400.
+ *
+ * Only `people` — despite the docs listing `company` here too, `company` +
+ * `excludeDomains` returns 200 and works (verified twice against the live API
+ * on 2026-07-29).
+ */
+export const CATEGORIES_WITHOUT_EXCLUDE_DOMAINS = ['people'] as const;
+
+/**
+ * @deprecated Split into `CATEGORIES_WITHOUT_DATE_FILTERS` and
+ * `CATEGORIES_WITHOUT_EXCLUDE_DOMAINS`, which the live API distinguishes.
  */
 export const CATEGORIES_WITHOUT_FILTERS = ['company', 'people'] as const;
 
@@ -184,6 +199,8 @@ export interface ExaResult {
   summary?: string;
   subpages?: ExaResult[];
   extras?: { links?: string[]; imageLinks?: string[]; [key: string]: unknown };
+  /** Undocumented; returned by `/contents` on some results. */
+  entities?: Array<Record<string, unknown>>;
 }
 
 export interface GroundingCitation {
@@ -214,6 +231,18 @@ export interface CostDollars {
 
 export interface SearchResponse<T = unknown> {
   requestId: string;
+  /**
+   * The search type the API actually ran.
+   *
+   * Note the name: the docs call this `searchType`, but the live API returns
+   * `resolvedSearchType` (verified 2026-07-29). It is often an empty string.
+   * `searchType` is kept below as an alias in case the docs describe a field
+   * that appears on some plans or endpoints.
+   */
+  resolvedSearchType?: string;
+  /** Undocumented, but always present: server-side search time in ms. */
+  searchTime?: number;
+  /** @deprecated The live API returns `resolvedSearchType`. */
   searchType?: string;
   results: ExaResult[];
   output?: ExaOutput<T>;

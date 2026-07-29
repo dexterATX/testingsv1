@@ -166,7 +166,7 @@ describe('search', () => {
   it('rejects invalid requests before any network call', async () => {
     const { client, calls } = makeClient([]);
 
-    await expect(client.search('q', { numResults: 500 })).rejects.toThrow(
+    await expect(client.search('q', { numResults: 0 })).rejects.toThrow(
       ExaRequestValidationError,
     );
     expect(calls).toHaveLength(0);
