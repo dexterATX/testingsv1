@@ -1,7 +1,15 @@
 /** Error types raised by the Exa client. */
 
+import type { ErrorAdapter } from '../http/transport.js';
+
 /** Base class — catch this to catch anything the client throws. */
 export class ExaError extends Error {
+  /**
+   * Whether the transport should try again. Carried on the error rather than
+   * inferred from its class, so the shared transport stays provider-agnostic.
+   */
+  readonly retryable: boolean = false;
+
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = new.target.name;
@@ -46,6 +54,8 @@ export class ExaUnprocessableError extends ExaApiError {}
 
 /** 429 — rate limited. Retried automatically up to `maxRetries`. */
 export class ExaRateLimitError extends ExaApiError {
+  override readonly retryable = true;
+
   /** Seconds from the `Retry-After` header, when the API sent one. */
   readonly retryAfterSeconds: number | undefined;
 
@@ -64,7 +74,9 @@ export class ExaRateLimitError extends ExaApiError {
 }
 
 /** 5xx — server-side failure. Retried automatically up to `maxRetries`. */
-export class ExaServerError extends ExaApiError {}
+export class ExaServerError extends ExaApiError {
+  override readonly retryable = true;
+}
 
 /** The request exceeded the configured timeout. */
 export class ExaTimeoutError extends ExaError {
@@ -77,7 +89,9 @@ export class ExaTimeoutError extends ExaError {
 }
 
 /** Network-level failure (DNS, TLS, connection reset). Retried automatically. */
-export class ExaConnectionError extends ExaError {}
+export class ExaConnectionError extends ExaError {
+  override readonly retryable = true;
+}
 
 /** Maps an HTTP status onto the matching error class. */
 export function errorForStatus(
@@ -112,3 +126,15 @@ export function isRetryable(error: unknown): boolean {
   if (error instanceof ExaConnectionError) return true;
   return false;
 }
+
+/** Lets the shared transport raise Exa's own error classes. */
+export const exaErrorAdapter: ErrorAdapter = {
+  fromStatus: (status, init) => errorForStatus(status, init),
+  timeout: (message, init) =>
+    new ExaTimeoutError(
+      `${message} Deep search types need a longer timeout — raise \`timeoutMs\` if this is expected.`,
+      init,
+    ),
+  connection: (message, init) => new ExaConnectionError(message, init),
+  protocol: (message) => new ExaError(message),
+};

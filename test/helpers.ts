@@ -1,6 +1,6 @@
 /** Shared fixtures for the client tests. */
 
-import type { SearchResponse } from '../src/types.js';
+import type { SearchResponse } from '../src/exa/types.js';
 
 export interface RecordedCall {
   url: string;

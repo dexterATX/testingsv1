@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ExaClient } from '../src/client.js';
+import { ExaClient } from '../../src/exa/client.js';
 import {
   ExaAuthError,
   ExaBadRequestError,
@@ -11,7 +11,7 @@ import {
   ExaServerError,
   ExaTimeoutError,
   ExaUnprocessableError,
-} from '../src/errors.js';
+} from '../../src/exa/errors.js';
 import {
   SEARCH_FIXTURE,
   hangingFetch,
@@ -20,7 +20,7 @@ import {
   noSleep,
   sseResponse,
   textResponse,
-} from './helpers.js';
+} from '../helpers.js';
 
 const API_KEY = 'test-key';
 

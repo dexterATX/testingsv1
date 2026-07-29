@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { ExaRequestValidationError } from '../src/errors.js';
+import { ExaRequestValidationError } from '../../src/exa/errors.js';
 import {
   assertValidContents,
   assertValidContentsRequest,
   assertValidOutputSchema,
   assertValidSearchRequest,
-} from '../src/validate.js';
-import type { JsonSchema, SearchRequest } from '../src/types.js';
+} from '../../src/exa/validate.js';
+import type { JsonSchema, SearchRequest } from '../../src/exa/types.js';
 
 const base: SearchRequest = { query: 'test query' };
 

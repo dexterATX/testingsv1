@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseEventStream, parseSearchStream, streamText } from '../src/stream.js';
-import { ExaError } from '../src/errors.js';
-import type { StreamChunk } from '../src/types.js';
+import { parseEventStream, parseSearchStream, streamText } from '../../src/exa/stream.js';
+import { ExaError } from '../../src/exa/errors.js';
+import type { StreamChunk } from '../../src/exa/types.js';
 
 /** Builds a byte stream from the given frames, one enqueue per frame. */
 function streamOf(...frames: string[]): ReadableStream<Uint8Array> {

@@ -13,9 +13,9 @@ import type { AddressInfo } from 'node:net';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { ExaClient } from '../src/client.js';
-import { ExaBadRequestError, ExaRequestValidationError } from '../src/errors.js';
-import { streamText } from '../src/stream.js';
+import { ExaClient } from '../../src/exa/client.js';
+import { ExaBadRequestError, ExaRequestValidationError } from '../../src/exa/errors.js';
+import { streamText } from '../../src/exa/stream.js';
 
 interface RecordedRequest {
   path: string;

@@ -1,8 +1,8 @@
 {
-  "name": "exa-client",
+  "name": "research-toolkit",
   "version": "0.1.0",
   "private": true,
-  "description": "Typed, dependency-free TypeScript client for the Exa search API",
+  "description": "Research toolkit: Exa for retrieval, Voxell embeddings for semantic rerank and dedupe",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -27,7 +27,9 @@
     "example:search": "node --import tsx --env-file-if-exists=.env examples/basic-search.ts",
     "example:structured": "node --import tsx --env-file-if-exists=.env examples/structured-output.ts",
     "example:contents": "node --import tsx --env-file-if-exists=.env examples/contents-and-answer.ts",
-    "example:stream": "node --import tsx --env-file-if-exists=.env examples/streaming.ts"
+    "example:stream": "node --import tsx --env-file-if-exists=.env examples/streaming.ts",
+    "test:live": "vitest run test/live",
+    "example:research": "node --import tsx --env-file-if-exists=.env examples/research-search.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
