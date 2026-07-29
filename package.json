@@ -28,7 +28,7 @@
     "example:structured": "node --import tsx --env-file-if-exists=.env examples/structured-output.ts",
     "example:contents": "node --import tsx --env-file-if-exists=.env examples/contents-and-answer.ts",
     "example:stream": "node --import tsx --env-file-if-exists=.env examples/streaming.ts",
-    "test:live": "vitest run test/live",
+    "test:live": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run test/live",
     "example:research": "node --import tsx --env-file-if-exists=.env examples/research-search.ts",
     "example:synthesis": "node --import tsx --env-file-if-exists=.env examples/research-synthesis.ts",
     "web": "node --import tsx --env-file-if-exists=.env src/server/main.ts"

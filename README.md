@@ -317,7 +317,7 @@ against the live API. **[docs/voxell-api-reference.md](docs/voxell-api-reference
 records the findings, including what was *not* established.
 
 ```bash
-VOXELL_LIVE_TEST=1 npm run test:live   # re-verify any time
+npm run test:live   # re-verify any time (set VOXELL_LIVE_TEST=1 in .env)
 ```
 
 > An identical request returns an identical vector, but the same text in a
@@ -399,7 +399,7 @@ docs/                 measured API references
 |---|---|
 | `npm run check` | Typecheck and test |
 | `npm test` | Offline suite (367 tests) |
-| `npm run test:live` | Live API tests — gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
+| `npm run test:live` | Live API tests — reads `.env`; gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
 | `npm run web` | **Local research UI** on http://127.0.0.1:4317 |
 | `npm run build` | Compile to `dist/` |
 | `npm run example:synthesis` | **Full pipeline + grounded write-up** |
