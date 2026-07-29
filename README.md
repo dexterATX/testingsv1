@@ -94,8 +94,35 @@ the operator's console sees `Missing Exa API key`, the page sees `Missing
 search API key`. See [`src/server/redact.ts`](src/server/redact.ts) for why
 that is enforced at the server and not in the page.
 
-Set `PORT` to change the port. The embedding cache is written to
-`.cache/vectors.jsonl`, so re-running a question costs nothing.
+| Variable | Default | |
+|---|---|---|
+| `PORT` | `4317` | |
+| `HOST` | `127.0.0.1` | Anything else prints a warning — see below |
+| `CACHE_PATH` | `<repo>/.cache/vectors.jsonl` | Anchored to the repo, not the working directory |
+
+## Deploying it to a server
+
+```bash
+sudo bash deploy/hostinger.sh
+```
+
+Written for a Hostinger VPS (Debian 13 / Ubuntu 24.04) but there is nothing
+Hostinger-specific in it — any systemd box works. It installs Node 22 if
+needed, clones and builds into `/opt/research-toolkit` as an unprivileged
+user, writes the keys to `/etc/research-toolkit.env` (root, mode 600), and
+installs a hardened systemd unit bound to `127.0.0.1`.
+
+It assumes the box is **already doing something**: it never edits a web server
+config it did not write, refuses a port that is taken, and every step is
+idempotent. If ports 80/443 already belong to something else it sets the app up
+anyway and tells you how to wire it in, rather than guessing.
+
+**It will not put the UI on the internet without a password.** The page has no
+login of its own and the process holds live API keys, so the Caddy site block
+it writes has `basic_auth` in it and the script prints a generated password
+once. If you bypass that and bind the app straight to a public interface,
+anyone who finds the port can spend your API credits — hence the startup
+warning when `HOST` is not localhost.
 
 ## The research pipeline
 
