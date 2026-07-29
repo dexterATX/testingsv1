@@ -13,7 +13,7 @@
   <body>
     <header class="masthead">
       <h1>Research Toolkit</h1>
-      <p class="sub">Exa retrieves · Voxell reranks and dedupes · an LLM writes it up</p>
+      <p class="sub">Search the web · rerank and dedupe by meaning · write it up with citations</p>
     </header>
 
     <main>
@@ -66,9 +66,9 @@
             <span>Write it up</span>
           </label>
 
-          <label class="field" id="provider-field" hidden>
-            <span class="label">Model</span>
-            <select id="provider"></select>
+          <label class="field" id="writer-field" hidden>
+            <span class="label">Writer</span>
+            <select id="writer"></select>
           </label>
         </div>
 
@@ -88,14 +88,14 @@
         <div id="error" class="error" hidden></div>
       </section>
 
-      <!-- Exa's raw hits, shown as soon as they land. -->
-      <section class="panel" id="exa-panel" hidden>
+      <!-- The raw search hits, shown as soon as they land. -->
+      <section class="panel" id="hits-panel" hidden>
         <div class="panel-head">
-          <h2>What Exa returned <span id="exa-count" class="pill"></span></h2>
-          <button type="button" class="linkish" id="toggle-exa">collapse</button>
+          <h2>What the search returned <span id="hits-count" class="pill"></span></h2>
+          <button type="button" class="linkish" id="toggle-hits">collapse</button>
         </div>
-        <p class="muted small" id="exa-meta"></p>
-        <ol id="exa-list" class="link-list"></ol>
+        <p class="muted small" id="hits-meta"></p>
+        <ol id="hits-list" class="link-list"></ol>
       </section>
 
       <section class="panel" id="ranked-panel" hidden>

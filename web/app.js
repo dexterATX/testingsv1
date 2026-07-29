@@ -2,10 +2,15 @@
  * Drives the research UI.
  *
  * The server streams one JSON object per SSE frame; each stage updates its own
- * section, so Exa's raw hits are on screen long before the ranking finishes.
+ * section, so the raw search hits are on screen long before the ranking
+ * finishes.
  *
  * Everything from the network is inserted as text, never as HTML — the titles
  * and excerpts come from arbitrary web pages.
+ *
+ * The UI names no provider or model, and it cannot: the server never sends
+ * one. Keep it that way — describe the stage ("embedding", "the write-up"),
+ * not the vendor behind it.
  */
 
 const $ = (id) => document.getElementById(id);
@@ -19,8 +24,8 @@ const el = {
   chunk: $('chunk'),
   cluster: $('cluster'),
   synthesize: $('synthesize'),
-  provider: $('provider'),
-  providerField: $('provider-field'),
+  writer: $('writer'),
+  writerField: $('writer-field'),
   run: $('run'),
   cancel: $('cancel'),
   configWarning: $('config-warning'),
@@ -30,11 +35,11 @@ const el = {
   elapsed: $('elapsed'),
   error: $('error'),
 
-  exaPanel: $('exa-panel'),
-  exaList: $('exa-list'),
-  exaCount: $('exa-count'),
-  exaMeta: $('exa-meta'),
-  toggleExa: $('toggle-exa'),
+  hitsPanel: $('hits-panel'),
+  hitsList: $('hits-list'),
+  hitsCount: $('hits-count'),
+  hitsMeta: $('hits-meta'),
+  toggleHits: $('toggle-hits'),
 
   rankedPanel: $('ranked-panel'),
   rankedList: $('ranked-list'),
@@ -117,13 +122,12 @@ function showError(message) {
 
 /* ------------------------------------------------------------- rendering */
 
-function renderExa(event) {
-  clear(el.exaList);
-  el.exaCount.textContent = String(event.results.length);
+function renderHits(event) {
+  clear(el.hitsList);
+  el.hitsCount.textContent = String(event.results.length);
 
   const cost = event.costDollars?.total;
-  el.exaMeta.textContent =
-    `Exa request ${event.requestId}` + (cost != null ? ` · $${cost}` : '');
+  el.hitsMeta.textContent = `request ${event.requestId}` + (cost != null ? ` · $${cost}` : '');
 
   event.results.forEach((result, index) => {
     const li = node('li');
@@ -136,10 +140,10 @@ function renderExa(event) {
     link.rel = 'noopener noreferrer';
     body.append(link, node('span', 'url', result.url));
     li.append(body);
-    el.exaList.append(li);
+    el.hitsList.append(li);
   });
 
-  el.exaPanel.hidden = false;
+  el.hitsPanel.hidden = false;
 }
 
 function deltaLabel(delta) {
@@ -156,7 +160,7 @@ function renderRanked(report) {
   el.rankedMeta.textContent =
     `${s.retrieved} retrieved · ${s.exactDuplicates} duplicate URLs · ` +
     `${s.nearDuplicates} near-duplicates collapsed · ${s.chunks} passages embedded ` +
-    `(${s.cacheHits} cached) · ${s.tokens} tokens · ${s.model} @ ${s.dim}d`;
+    `(${s.cacheHits} cached) · ${s.tokens} tokens · ${s.dim}-dim vectors`;
 
   report.results.forEach((entry, index) => {
     const li = node('li');
@@ -285,9 +289,9 @@ function renderSynthesis(synthesis) {
   }
 
   const usage = synthesis.usage;
-  el.synthesisMeta.textContent =
-    `${synthesis.model ?? ''}` +
-    (usage ? ` · ${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out` : '');
+  el.synthesisMeta.textContent = usage
+    ? `${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out`
+    : '';
 
   el.synthesisPanel.hidden = false;
 }
@@ -299,12 +303,12 @@ let lastReport = null;
 function handle(event) {
   switch (event.type) {
     case 'search:start':
-      stage('search', 'Searching Exa', `“${event.query}” · ${event.numResults} results`, false);
+      stage('search', 'Searching', `“${event.query}” · ${event.numResults} results`, false);
       break;
 
     case 'search:done':
-      stage('search', 'Searching Exa', `${event.results.length} results`, true);
-      renderExa(event);
+      stage('search', 'Searching', `${event.results.length} results`, true);
+      renderHits(event);
       break;
 
     case 'dedupe:exact':
@@ -328,7 +332,7 @@ function handle(event) {
       stage(
         'embed',
         'Embedding',
-        `${event.model} @ ${event.dim}d · ${event.tokens} tokens · ${event.cacheHits} cached`,
+        `${event.dim}-dim · ${event.tokens} tokens · ${event.cacheHits} cached`,
         true,
       );
       break;
@@ -352,7 +356,7 @@ function handle(event) {
       break;
 
     case 'synthesis:start':
-      stage('synth', 'Writing up', event.provider, false);
+      stage('synth', 'Writing up', 'drafting from the ranked sources', false);
       break;
 
     case 'synthesis:done':
@@ -389,7 +393,7 @@ async function run(payload) {
   el.error.hidden = true;
   el.progressPanel.hidden = false;
   clear(el.stages);
-  for (const panel of [el.exaPanel, el.rankedPanel, el.themesPanel, el.synthesisPanel]) {
+  for (const panel of [el.hitsPanel, el.rankedPanel, el.themesPanel, el.synthesisPanel]) {
     panel.hidden = true;
   }
 
@@ -463,7 +467,7 @@ el.form.addEventListener('submit', (event) => {
     chunk: el.chunk.checked,
     cluster: el.cluster.checked,
     synthesize: el.synthesize.checked,
-    provider: el.provider.value || undefined,
+    writer: el.writer.value || undefined,
   });
 });
 
@@ -473,35 +477,42 @@ el.cancel.addEventListener('click', () => {
   stopClock();
 });
 
-el.toggleExa.addEventListener('click', () => {
-  const collapsed = el.exaList.hidden;
-  el.exaList.hidden = !collapsed;
-  el.toggleExa.textContent = collapsed ? 'collapse' : 'expand';
+el.toggleHits.addEventListener('click', () => {
+  const collapsed = el.hitsList.hidden;
+  el.hitsList.hidden = !collapsed;
+  el.toggleHits.textContent = collapsed ? 'collapse' : 'expand';
 });
 
-/* Report what the server is actually configured for, rather than failing later. */
+/*
+ * Report what the server is actually configured for, rather than failing later.
+ * The server answers in capabilities — search, embeddings, writers — so this
+ * can say what is missing without saying whose key it is.
+ */
 fetch('/api/config')
   .then((r) => r.json())
   .then((config) => {
     const missing = [];
-    if (!config.hasExa) missing.push('EXA_API_KEY');
-    if (!config.hasVoxell) missing.push('VOXELL_API_KEY');
+    if (!config.search) missing.push('web search');
+    if (!config.embeddings) missing.push('embeddings');
 
     if (missing.length > 0) {
-      el.configWarning.textContent = `Missing ${missing.join(' and ')} — searches will fail.`;
+      el.configWarning.textContent =
+        `No API key configured for ${missing.join(' or ')} — ` +
+        `add one to .env and restart; searches will fail until then.`;
       el.configWarning.hidden = false;
     }
 
-    if (config.providers.length === 0) {
+    const writers = config.writers ?? [];
+    if (writers.length === 0) {
       el.synthesize.checked = false;
       el.synthesize.disabled = true;
       el.synthesize.closest('.toggle').title =
-        'Set ANTHROPIC_API_KEY or FIREWORKS_API_KEY to enable synthesis.';
-    } else if (config.providers.length > 1) {
-      for (const provider of config.providers) {
-        el.provider.append(new Option(provider, provider));
+        'No write-up backend is configured. Add an API key to .env to enable this.';
+    } else if (writers.length > 1) {
+      for (const writer of writers) {
+        el.writer.append(new Option(writer.label, writer.id));
       }
-      el.providerField.hidden = false;
+      el.writerField.hidden = false;
     }
   })
   .catch(() => {});

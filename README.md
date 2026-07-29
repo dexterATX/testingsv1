@@ -35,7 +35,7 @@ pipeline, and the vector stores have **no runtime dependencies** — just Node
 ```bash
 cp .env.example .env     # EXA_API_KEY, VOXELL_API_KEY, + ANTHROPIC_API_KEY or FIREWORKS_API_KEY
 npm install
-npm run check            # typecheck + 367 tests, no network, no keys needed
+npm run check            # typecheck + 379 tests, no network, no keys needed
 ```
 
 Then either the web UI:
@@ -72,7 +72,7 @@ embeddings are still in flight.
 Sections fill in as the run progresses:
 
 1. **Pipeline** — each stage with live counts (results, passages, tokens, cache hits)
-2. **What Exa returned** — the unmodified hit list, in Exa's own order
+2. **What the search returned** — the unmodified hit list, in the order Exa gave it
 3. **After reranking & dedupe** — scores, rank movement (`↑9`), the matching
    excerpt, and which sources were collapsed into each result
 4. **Themes** — clusters, when enabled
@@ -84,6 +84,15 @@ Fabricated citations are called out in red rather than quietly rendered.
 holds the credentials and sends back results. It binds to `127.0.0.1` for that
 reason — override with `HOST` only if you understand the exposure. Closing the
 tab aborts the in-flight run.
+
+**Provider names never reach it either.** The UI describes stages, not vendors:
+`/api/config` answers in capabilities (`search`, `embeddings`, `writers`), the
+write-up backends are offered as opaque ids (`writer-a`, `writer-b`) labelled
+*Default* / *Alternate*, and the model fields are stripped from the SSE stream
+rather than merely left unrendered. Error messages get the same treatment —
+the operator's console sees `Missing Exa API key`, the page sees `Missing
+search API key`. See [`src/server/redact.ts`](src/server/redact.ts) for why
+that is enforced at the server and not in the page.
 
 Set `PORT` to change the port. The embedding cache is written to
 `.cache/vectors.jsonl`, so re-running a question costs nothing.
@@ -387,7 +396,7 @@ src/
   server/             local HTTP server + SSE progress stream
 web/                  the UI (plain HTML/CSS/JS, no build step)
 test/
-  exa/ voxell/ fireworks/ server/ store/ …   367 tests — no network, no keys
+  exa/ voxell/ fireworks/ server/ store/ …   379 tests — no network, no keys
   live/                                       57 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
@@ -398,7 +407,7 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (367 tests) |
+| `npm test` | Offline suite (379 tests) |
 | `npm run test:live` | Live API tests — reads `.env`; gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
 | `npm run web` | **Local research UI** on http://127.0.0.1:4317 |
 | `npm run build` | Compile to `dist/` |

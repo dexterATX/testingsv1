@@ -6,5 +6,12 @@
  * console.log(`open ${url}`);
  */
 
-export { availableProviders, createServer, parseRunRequest, startServer } from './server.js';
-export type { ServerOptions } from './server.js';
+export {
+  availableProviders,
+  availableWriters,
+  createServer,
+  parseRunRequest,
+  startServer,
+} from './server.js';
+export type { ServerOptions, Writer } from './server.js';
+export { namesAProvider, redactErrorName, redactMessage } from './redact.js';

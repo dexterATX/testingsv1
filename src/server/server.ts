@@ -2,12 +2,17 @@
  * Local web server for running research from a browser.
  *
  * The pipeline runs server-side and streams progress to the page over SSE, so
- * Exa's raw hits appear immediately and the ranked, deduped, synthesized
+ * the raw search hits appear immediately and the ranked, deduped, synthesized
  * result fills in behind them.
  *
  * **API keys never leave this process.** The browser talks only to localhost
  * and receives results, never credentials — which is also why the server binds
  * to 127.0.0.1 by default rather than 0.0.0.0.
+ *
+ * **Provider names never leave this process either.** Every wire payload is
+ * built field by field, so the page learns what each stage did and nothing
+ * about which vendor did it. See `./redact.ts` for why that is enforced here
+ * and not in the UI.
  */
 
 import { createReadStream } from 'node:fs';
@@ -21,10 +26,11 @@ import { VoxellClient } from '../voxell/client.js';
 import { FileVectorStore } from '../store/file.js';
 import { researchSearch, type ResearchReport } from '../research/pipeline.js';
 import type { ResearchEvent } from '../research/events.js';
-import { synthesize } from '../synthesis/synthesize.js';
+import { synthesize, type Synthesis } from '../synthesis/synthesize.js';
 import { anthropicCompleter } from '../synthesis/anthropic.js';
 import { fireworksCompleter } from '../synthesis/fireworks.js';
 import type { Completer } from '../synthesis/types.js';
+import { redactErrorName, redactMessage } from './redact.js';
 
 export interface ServerOptions {
   port?: number;
@@ -44,9 +50,12 @@ interface RunRequest {
   cluster?: unknown;
   topK?: unknown;
   synthesize?: unknown;
-  provider?: unknown;
+  /** An opaque id from `/api/config`, never a provider name. */
+  writer?: unknown;
   searchType?: unknown;
 }
+
+type Provider = 'anthropic' | 'fireworks';
 
 interface RunConfig {
   query: string;
@@ -55,9 +64,31 @@ interface RunConfig {
   cluster: boolean;
   topK: number | undefined;
   synthesize: boolean;
-  provider: 'anthropic' | 'fireworks' | undefined;
+  provider: Provider | undefined;
   searchType: string | undefined;
 }
+
+/** Writer id shown to the page, per provider. */
+export interface Writer {
+  id: string;
+  label: string;
+}
+
+/**
+ * Stable, opaque ids for the write-up backends.
+ *
+ * Deliberately not derived from position: the page caches these across runs,
+ * and a positional id would silently start meaning a different backend the
+ * moment a key is added or removed.
+ */
+const WRITER_ID: Record<Provider, string> = {
+  anthropic: 'writer-a',
+  fireworks: 'writer-b',
+};
+
+const PROVIDER_BY_WRITER_ID = new Map<string, Provider>(
+  (Object.entries(WRITER_ID) as Array<[Provider, string]>).map(([provider, id]) => [id, provider]),
+);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -69,12 +100,32 @@ const MIME: Record<string, string> = {
 
 const MAX_BODY_BYTES = 64 * 1024;
 
-/** Which synthesis providers this process actually has keys for. */
-export function availableProviders(): Array<'anthropic' | 'fireworks'> {
-  const providers: Array<'anthropic' | 'fireworks'> = [];
+/**
+ * Which synthesis providers this process actually has keys for.
+ *
+ * Server-side only — the page gets `availableWriters()` instead.
+ */
+export function availableProviders(): Provider[] {
+  const providers: Provider[] = [];
   if (process.env['ANTHROPIC_API_KEY']) providers.push('anthropic');
   if (process.env['FIREWORKS_API_KEY']) providers.push('fireworks');
   return providers;
+}
+
+/**
+ * The same list, as opaque ids the page can offer as a choice.
+ *
+ * The first configured provider is the default, so the labels describe rank
+ * rather than identity.
+ */
+export function availableWriters(): Writer[] {
+  const providers = availableProviders();
+
+  return providers.map((provider, index) => ({
+    id: WRITER_ID[provider],
+    label:
+      index === 0 ? 'Default' : providers.length > 2 ? `Alternate ${index}` : 'Alternate',
+  }));
 }
 
 export function parseRunRequest(raw: RunRequest): RunConfig {
@@ -93,7 +144,7 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
       : undefined;
 
   const provider =
-    raw.provider === 'anthropic' || raw.provider === 'fireworks' ? raw.provider : undefined;
+    typeof raw.writer === 'string' ? PROVIDER_BY_WRITER_ID.get(raw.writer) : undefined;
 
   return {
     query,
@@ -107,22 +158,25 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
   };
 }
 
-function pickCompleter(provider: RunConfig['provider']): { name: string; completer: Completer } {
+/**
+ * Resolves the write-up backend.
+ *
+ * The failure messages stay generic on purpose: they are shown in the browser,
+ * and naming the missing key would name the vendor. The README says which
+ * variables `.env` wants.
+ */
+function pickCompleter(provider: RunConfig['provider']): Completer {
   const available = availableProviders();
   const chosen = provider ?? available[0];
 
   if (!chosen) {
-    throw new Error(
-      'No synthesis provider configured. Set ANTHROPIC_API_KEY or FIREWORKS_API_KEY.',
-    );
+    throw new Error('No write-up backend is configured. Add an API key to .env — see the README.');
   }
   if (!available.includes(chosen)) {
-    throw new Error(`No API key for "${chosen}". Available: ${available.join(', ') || 'none'}.`);
+    throw new Error('That write-up backend has no API key configured.');
   }
 
-  return chosen === 'anthropic'
-    ? { name: 'anthropic', completer: anthropicCompleter() }
-    : { name: 'fireworks', completer: fireworksCompleter() };
+  return chosen === 'anthropic' ? anthropicCompleter() : fireworksCompleter();
 }
 
 async function readBody(request: http.IncomingMessage): Promise<string> {
@@ -166,6 +220,38 @@ async function serveStatic(
   }
 }
 
+/**
+ * Strips the name-bearing fields off a pipeline event.
+ *
+ * `embed:done` is the only event that carries one today, and it is rebuilt
+ * field by field rather than spread-minus-`model`, so a name added to the
+ * event later is excluded by default instead of leaking on the next release.
+ */
+function publicEvent(event: ResearchEvent): Record<string, unknown> {
+  if (event.type !== 'embed:done') return event;
+
+  return {
+    type: event.type,
+    dim: event.dim,
+    tokens: event.tokens,
+    cacheHits: event.cacheHits,
+    latencyMs: event.latencyMs,
+  };
+}
+
+/** Same treatment for the write-up: everything except which model wrote it. */
+function publicSynthesis(synthesis: Synthesis): Record<string, unknown> {
+  return {
+    query: synthesis.query,
+    text: synthesis.text,
+    sources: synthesis.sources,
+    invalidMarkers: synthesis.invalidMarkers,
+    uncitedMarkers: synthesis.uncitedMarkers,
+    stopReason: synthesis.stopReason,
+    usage: synthesis.usage,
+  };
+}
+
 /** Runs the pipeline, streaming each stage to the page as an SSE frame. */
 async function handleRun(
   request: http.IncomingMessage,
@@ -178,7 +264,7 @@ async function handleRun(
   } catch (error) {
     response
       .writeHead(400, { 'Content-Type': 'application/json' })
-      .end(JSON.stringify({ error: (error as Error).message }));
+      .end(JSON.stringify({ error: redactMessage((error as Error).message) }));
     return;
   }
 
@@ -212,15 +298,15 @@ async function handleRun(
       cluster: config.cluster,
       ...(config.topK !== undefined ? { topK: config.topK } : {}),
       ...(config.searchType ? { search: { type: config.searchType as never } } : {}),
-      onEvent: (event: ResearchEvent) => send(event),
+      onEvent: (event: ResearchEvent) => send(publicEvent(event)),
       signal: controller.signal,
     });
 
     send({ type: 'report', report: serializeReport(report) });
 
     if (config.synthesize) {
-      const { name, completer } = pickCompleter(config.provider);
-      send({ type: 'synthesis:start', provider: name });
+      const completer = pickCompleter(config.provider);
+      send({ type: 'synthesis:start' });
 
       const synthesis = await synthesize(report, {
         completer,
@@ -228,16 +314,20 @@ async function handleRun(
         signal: controller.signal,
       });
 
-      send({ type: 'synthesis:done', synthesis });
+      send({ type: 'synthesis:done', synthesis: publicSynthesis(synthesis) });
     }
 
     send({ type: 'complete' });
   } catch (error) {
     if (!controller.signal.aborted) {
+      // The operator gets the real error; the page gets it with the vendor
+      // filed off, since an upstream message can quote a model id or a host.
+      console.error('[research] run failed:', error);
+
       send({
         type: 'error',
-        message: (error as Error).message,
-        name: (error as Error).name,
+        message: redactMessage((error as Error).message),
+        name: redactErrorName((error as Error).name),
       });
     }
   } finally {
@@ -251,11 +341,27 @@ async function handleRun(
  * With chunking on, `embeddedText` holds whole pages — sending those would
  * dwarf everything else on the stream for no benefit, since the page only ever
  * renders the best-matching excerpt.
+ *
+ * `stats.model` is dropped for a different reason: it names the embedding
+ * backend, and the page is vendor-neutral.
  */
 export function serializeReport(report: ResearchReport): Record<string, unknown> {
+  const stats = report.stats;
+
   return {
     query: report.query,
-    stats: report.stats,
+    stats: {
+      retrieved: stats.retrieved,
+      exactDuplicates: stats.exactDuplicates,
+      embedded: stats.embedded,
+      chunks: stats.chunks,
+      nearDuplicates: stats.nearDuplicates,
+      belowThreshold: stats.belowThreshold,
+      dim: stats.dim,
+      tokens: stats.tokens,
+      embedLatencyMs: stats.embedLatencyMs,
+      cacheHits: stats.cacheHits,
+    },
     clusters: report.clusters ?? null,
     results: report.results.map((entry) => ({
       url: entry.result.url,
@@ -288,9 +394,11 @@ export function createServer(options: ServerOptions): http.Server {
         .writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
         .end(
           JSON.stringify({
-            providers: availableProviders(),
-            hasExa: Boolean(process.env['EXA_API_KEY']),
-            hasVoxell: Boolean(process.env['VOXELL_API_KEY']),
+            // Capabilities, not vendors: the page needs to know what it can
+            // offer, not who is behind it.
+            search: Boolean(process.env['EXA_API_KEY']),
+            embeddings: Boolean(process.env['VOXELL_API_KEY']),
+            writers: availableWriters(),
           }),
         );
       return;
