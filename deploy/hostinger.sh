@@ -272,15 +272,24 @@ install -d -o "$APP_USER" -g "$APP_USER" "$APP_DIR/.cache"
 
 say "Writing $ENV_FILE"
 
-umask 077
-{
-  echo "# Written by deploy/hostinger.sh. Mode 600, root-owned, read by systemd."
-  for name in EXA_API_KEY VOXELL_API_KEY FIREWORKS_API_KEY ANTHROPIC_API_KEY; do
-    [ -n "${KEYS[$name]:-}" ] && printf '%s=%s\n' "$name" "${KEYS[$name]}"
-  done
-  echo "PORT=$APP_PORT"
-  echo "HOST=127.0.0.1"
-} > "$ENV_FILE"
+# The umask stays inside this subshell.
+#
+# Setting `umask 077` at top level to protect this one file silently applies
+# to every file the script writes afterwards — and most of those are read by
+# somebody other than root: apt's keyring by `_apt`, the Caddy site file by
+# the `caddy` user. They fail with a permission error that points at the
+# reader, never at the umask that caused it.
+(
+  umask 077
+  {
+    echo "# Written by deploy/hostinger.sh. Mode 600, root-owned, read by systemd."
+    for name in EXA_API_KEY VOXELL_API_KEY FIREWORKS_API_KEY ANTHROPIC_API_KEY; do
+      [ -n "${KEYS[$name]:-}" ] && printf '%s=%s\n' "$name" "${KEYS[$name]}"
+    done
+    echo "PORT=$APP_PORT"
+    echo "HOST=127.0.0.1"
+  } > "$ENV_FILE"
+)
 chmod 600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 info "$(grep -c '=' "$ENV_FILE") variables, mode 600"
@@ -322,6 +331,7 @@ MemoryMax=2G
 WantedBy=multi-user.target
 UNIT
 
+chmod 644 "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable --now "$SERVICE" >/dev/null
 sleep 3
@@ -371,10 +381,19 @@ case "$PROXY_MODE" in
     if [ "$PROXY_MODE" = caddy-install ]; then
       info "installing Caddy"
       apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https >/dev/null
+
+      # apt verifies signatures as the `_apt` user, so the keyring and the
+      # source list must be world-readable. `--yes` because gpg refuses to
+      # overwrite an existing file and would otherwise wedge a re-run.
+      rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
       curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        | gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      chmod 644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
       curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
         > /etc/apt/sources.list.d/caddy-stable.list
+      chmod 644 /etc/apt/sources.list.d/caddy-stable.list
+
       apt-get update -qq
       apt-get install -y -qq caddy >/dev/null
     else
@@ -403,6 +422,10 @@ $AUTH_BLOCK	reverse_proxy 127.0.0.1:$APP_PORT {
 	}
 }
 CADDY
+
+    # Caddy runs as the `caddy` user, not as root: a 600 site file validates
+    # fine (validate runs as root) and then fails on reload.
+    chmod 644 "/etc/caddy/conf.d/$SERVICE.caddy"
 
     if ! grep -q 'conf.d/\*.caddy' /etc/caddy/Caddyfile 2>/dev/null; then
       printf '\nimport /etc/caddy/conf.d/*.caddy\n' >> /etc/caddy/Caddyfile
