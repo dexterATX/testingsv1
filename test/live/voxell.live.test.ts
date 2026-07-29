@@ -11,10 +11,15 @@
  * measurements still hold.
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { VoxellClient } from '../../src/voxell/client.js';
 import { cosineSimilarity, isNormalized } from '../../src/research/similarity.js';
+import { FileVectorStore } from '../../src/store/file.js';
 
 // Real network plus a 32000-character embed does not fit in the 5s default.
 vi.setConfig({ testTimeout: 60_000 });
@@ -132,5 +137,36 @@ describe.skipIf(!enabled)('Voxell live API', () => {
     const { data } = await client().models();
 
     expect(data.map((m) => m.id)).toContain('forge-turbo');
+  });
+});
+
+describe.skipIf(!enabled)('FileVectorStore with live Voxell', () => {
+  it('persists real vectors across client instances', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'voxell-live-'));
+    const path = join(dir, 'vectors.jsonl');
+
+    try {
+      const first = new VoxellClient({ store: new FileVectorStore({ path }), maxRetries: 1 });
+      const cold = await first.embed(['persistence probe one', 'persistence probe two']);
+
+      expect(cold.cacheHits).toBe(0);
+      expect(cold.tokens).toBeGreaterThan(0);
+
+      // A brand-new client and a brand-new store, reading the same file.
+      const second = new VoxellClient({ store: new FileVectorStore({ path }), maxRetries: 1 });
+      const warm = await second.embed(['persistence probe one', 'persistence probe two']);
+
+      expect(warm.cacheHits).toBe(2);
+      expect(warm.batches).toBe(0);
+      expect(warm.tokens).toBe(0);
+
+      // Float32 storage is lossy relative to the API's float64 JSON, so
+      // compare by similarity rather than equality — the drift must be far
+      // below anything the ranking thresholds care about.
+      expect(cosineSimilarity(cold.embeddings[0]!, warm.embeddings[0]!)).toBeGreaterThan(0.9999);
+      expect(warm.embeddings[0]).toHaveLength(1024);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

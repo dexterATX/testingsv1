@@ -18,6 +18,8 @@
  */
 
 import { HttpTransport, type RequestOverrides } from '../http/transport.js';
+import { MemoryVectorStore } from '../store/memory.js';
+import { vectorKey, type VectorStore } from '../store/types.js';
 import { VoxellError, VoxellRequestValidationError, voxellErrorAdapter } from './errors.js';
 import {
   DEFAULT_EMBED_MODEL,
@@ -59,11 +61,16 @@ export interface VoxellClientOptions {
    * Cache vectors in memory across calls. Defaults to true. Saves a round trip
    * and the tokens; the cached vector may differ from a fresh one by ~6e-4 per
    * component if the batch shape differs, which no threshold in this library
-   * is sensitive to.
+   * is sensitive to. Ignored when `store` is supplied.
    */
   cache?: boolean;
   /** Cache entry ceiling before oldest-first eviction. Defaults to 10000. */
   maxCacheEntries?: number;
+  /**
+   * Vector store backing the cache. Defaults to an in-memory store; pass a
+   * `FileVectorStore` to persist embeddings across processes.
+   */
+  store?: VectorStore;
   /**
    * What to do with a text over the API's 32000-character ceiling:
    * `'error'` (default) throws, `'truncate'` clips it and proceeds.
@@ -127,8 +134,7 @@ export class VoxellClient {
   private readonly batchSize: number;
   private readonly concurrency: number;
   private readonly onOversizedText: 'error' | 'truncate';
-  private readonly cache: Map<string, number[]> | undefined;
-  private readonly maxCacheEntries: number;
+  private readonly store: VectorStore | undefined;
 
   constructor(options: VoxellClientOptions = {}) {
     const apiKey = options.apiKey ?? process.env['VOXELL_API_KEY'];
@@ -148,8 +154,13 @@ export class VoxellClient {
     this.batchSize = options.batchSize ?? LIMITS.defaultBatchSize;
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.onOversizedText = options.onOversizedText ?? 'error';
-    this.maxCacheEntries = options.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES;
-    this.cache = options.cache === false ? undefined : new Map();
+    this.store =
+      options.store ??
+      (options.cache === false
+        ? undefined
+        : new MemoryVectorStore({
+            maxEntries: options.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES,
+          }));
 
     if (this.batchSize < 1) {
       throw new VoxellRequestValidationError('`batchSize` must be at least 1.');
@@ -202,14 +213,16 @@ export class VoxellClient {
       slotForInput.push(slot);
     }
 
+    const keys = uniqueTexts.map((text) => vectorKey(model, text));
     const vectors = new Array<number[] | undefined>(uniqueTexts.length);
     const misses: number[] = [];
     let cacheHits = 0;
 
+    const cached = this.store ? await this.store.getMany(keys) : [];
     for (let i = 0; i < uniqueTexts.length; i += 1) {
-      const cached = this.cacheGet(model, uniqueTexts[i] as string);
-      if (cached) {
-        vectors[i] = cached;
+      const hit = cached[i];
+      if (hit) {
+        vectors[i] = hit;
         cacheHits += 1;
       } else {
         misses.push(i);
@@ -233,6 +246,7 @@ export class VoxellClient {
     let backingModel = model;
     let tokens = 0;
     let latencyMs = 0;
+    const writes: Array<{ key: string; vector: number[] }> = [];
 
     for (const [batchIndex, response] of responses.entries()) {
       const batch = batches[batchIndex] as number[];
@@ -246,7 +260,7 @@ export class VoxellClient {
       for (const [offset, slot] of batch.entries()) {
         const vector = response.embeddings[offset] as number[];
         vectors[slot] = vector;
-        this.cacheSet(model, uniqueTexts[slot] as string, vector);
+        writes.push({ key: keys[slot] as string, vector });
       }
 
       dim = response.dim;
@@ -254,6 +268,9 @@ export class VoxellClient {
       tokens += response.tokens ?? 0;
       latencyMs += response.latency_ms ?? 0;
     }
+
+    // One write for the whole call, so a file-backed store does a single append.
+    if (this.store && writes.length > 0) await this.store.setMany(writes);
 
     return {
       embeddings: slotForInput.map((slot) => vectors[slot] as number[]),
@@ -283,8 +300,8 @@ export class VoxellClient {
   }
 
   /** Drops every cached vector. */
-  clearCache(): void {
-    this.cache?.clear();
+  async clearCache(): Promise<void> {
+    await this.store?.clear();
   }
 
   private async postEmbed(
@@ -340,25 +357,5 @@ export class VoxellClient {
 
       return text;
     });
-  }
-
-  private cacheKey(model: EmbedModelName, text: string): string {
-    return `${model} ${text}`;
-  }
-
-  private cacheGet(model: EmbedModelName, text: string): number[] | undefined {
-    return this.cache?.get(this.cacheKey(model, text));
-  }
-
-  private cacheSet(model: EmbedModelName, text: string, vector: number[]): void {
-    if (!this.cache) return;
-
-    if (this.cache.size >= this.maxCacheEntries) {
-      // Map preserves insertion order, so the first key is the oldest.
-      const oldest = this.cache.keys().next();
-      if (!oldest.done) this.cache.delete(oldest.value);
-    }
-
-    this.cache.set(this.cacheKey(model, text), vector);
   }
 }

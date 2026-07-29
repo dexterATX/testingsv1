@@ -14,3 +14,5 @@
 export * from './exa/index.js';
 export * from './voxell/index.js';
 export * from './research/index.js';
+export * from './store/index.js';
+export * from './synthesis/index.js';

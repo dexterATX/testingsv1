@@ -2,19 +2,21 @@
  * The Exa → Voxell join.
  *
  * Exa retrieves broadly; Voxell embeddings then re-score every result against
- * the query and collapse restatements of the same story. Retrieval and ranking
- * come from different models, so the second pass catches results the first
- * ranked generously — and, more usefully, demotes ones that matched on
- * keywords rather than meaning.
+ * the query, collapse restatements of the same story, and optionally group
+ * what survives into themes. Retrieval and ranking come from different models,
+ * so the second pass catches results the first ranked generously — and, more
+ * usefully, demotes ones that matched on keywords rather than meaning.
  */
 
 import type { ExaClient } from '../exa/client.js';
-import type { RequestOverrides } from '../http/transport.js';
 import type { ExaResult, SearchOptions, SearchResponse } from '../exa/types.js';
+import type { RequestOverrides } from '../http/transport.js';
 import type { VoxellClient } from '../voxell/client.js';
 import type { EmbedModelName } from '../voxell/types.js';
+import { chunkText, type ChunkOptions } from './chunk.js';
+import { clusterVectors, DEFAULT_CLUSTER_THRESHOLD, type ClusterOptions } from './cluster.js';
 import { DEFAULT_DEDUPE_THRESHOLD, collapseNearDuplicates } from './dedupe.js';
-import { cosineSimilarity } from './similarity.js';
+import { centroid, cosineSimilarity } from './similarity.js';
 import { canonicalizeUrl, resultToEmbedText, type EmbedTextOptions } from './text.js';
 
 export interface ResearchOptions {
@@ -28,16 +30,32 @@ export interface ResearchOptions {
   model?: EmbedModelName;
   /** How each result is turned into embeddable text. */
   embedText?: EmbedTextOptions;
+  /**
+   * Embed each result as several passages instead of one vector, scoring it by
+   * its best-matching passage. Improves precision on long pages, at the cost
+   * of more embedded text. Pass `true` for defaults, or an options object.
+   */
+  chunk?: boolean | ChunkOptions;
   /** Collapse near-duplicates. Defaults to true. */
   dedupe?: boolean;
   /** Cosine threshold for near-duplicates. Defaults to 0.92. */
   dedupeThreshold?: number;
+  /** Group surviving results into themes. Pass `true` for defaults. */
+  cluster?: boolean | ClusterOptions;
   /** Drop results scoring below this against the query. */
   minScore?: number;
   /** Keep only the top N after ranking and dedupe. */
   topK?: number;
   /** Aborts both the Exa and Voxell calls. */
   signal?: AbortSignal;
+}
+
+export interface BestChunk {
+  text: string;
+  /** Position of the chunk within its source document. */
+  index: number;
+  /** Similarity of this passage to the query. */
+  score: number;
 }
 
 export interface RankedResult {
@@ -50,20 +68,39 @@ export interface RankedResult {
   rankDelta: number;
   /** Results collapsed into this one as near-duplicates. */
   duplicates: Array<{ result: ExaResult; similarity: number }>;
-  /** The text that was actually embedded. */
+  /** The text that was embedded (the whole document when chunking is off). */
   embeddedText: string;
+  /** With chunking on: the passage that scored highest against the query. */
+  bestChunk?: BestChunk;
+  /** With chunking on: how many passages this result was split into. */
+  chunkCount?: number;
+}
+
+export interface ResearchCluster {
+  /** Title of the most representative member — a cheap theme label. */
+  label: string;
+  /** Indices into `report.results`. */
+  members: number[];
+  /** Index into `report.results` of the most representative member. */
+  exemplar: number;
+  /** Mean similarity of members to the cluster centre, in [-1, 1]. */
+  cohesion: number;
 }
 
 export interface ResearchReport {
   query: string;
   results: RankedResult[];
+  /** Present only when `cluster` was requested. Largest theme first. */
+  clusters?: ResearchCluster[];
   stats: {
     /** Results Exa returned. */
     retrieved: number;
     /** Removed because another result had the same canonical URL. */
     exactDuplicates: number;
-    /** Texts sent for embedding (results + the query itself). */
+    /** Texts sent for embedding (passages + the query itself). */
     embedded: number;
+    /** Passages embedded across all results; equals result count when chunking is off. */
+    chunks: number;
     /** Results absorbed into a near-duplicate group. */
     nearDuplicates: number;
     /** Dropped by `minScore`. */
@@ -80,14 +117,45 @@ export interface ResearchReport {
 }
 
 const DEFAULT_NUM_RESULTS = 25;
+/** Chunking wants whole pages, so it asks Exa for more text per result. */
+const CHUNKED_EMBED_MAX_CHARS = 24_000;
+
+function emptyReport(
+  query: string,
+  searchResponse: SearchResponse,
+  retrieved: number,
+  exactDuplicates: number,
+): ResearchReport {
+  return {
+    query,
+    results: [],
+    stats: {
+      retrieved,
+      exactDuplicates,
+      embedded: 0,
+      chunks: 0,
+      nearDuplicates: 0,
+      belowThreshold: 0,
+      dim: 0,
+      model: '',
+      tokens: 0,
+      embedLatencyMs: 0,
+      cacheHits: 0,
+    },
+    exa: searchResponse,
+  };
+}
 
 /**
- * Runs the full pipeline: search, embed, rerank, dedupe.
+ * Runs the full pipeline: search, embed, rerank, dedupe, and optionally
+ * cluster.
  *
  * @example
  * const report = await researchSearch(exa, voxell, {
  *   query: 'how are teams evaluating RAG pipelines in production?',
  *   numResults: 25,
+ *   chunk: true,
+ *   cluster: true,
  *   topK: 10,
  * });
  */
@@ -102,8 +170,10 @@ export async function researchSearch(
     search = {},
     model,
     embedText,
+    chunk = false,
     dedupe = true,
     dedupeThreshold = DEFAULT_DEDUPE_THRESHOLD,
+    cluster = false,
     minScore,
     topK,
     signal,
@@ -113,11 +183,17 @@ export async function researchSearch(
     throw new Error('`query` is required and must be a non-empty string.');
   }
 
-  // Highlights are what gets embedded, so ask for them unless the caller
-  // deliberately chose a different content mode.
+  const chunking = chunk !== false;
+  const chunkOptions: ChunkOptions = typeof chunk === 'object' ? chunk : {};
+
+  // Chunking needs whole pages to be worth doing; highlights are already short.
+  const defaultContents = chunking
+    ? { text: { maxCharacters: CHUNKED_EMBED_MAX_CHARS }, highlights: true }
+    : { highlights: true };
+
   const searchResponse = await exa.search(query, {
     numResults,
-    contents: { highlights: true },
+    contents: defaultContents,
     ...search,
     ...(signal ? { signal } : {}),
   });
@@ -136,45 +212,83 @@ export async function researchSearch(
   }
 
   const exactDuplicates = retrieved - unique.length;
-
   if (unique.length === 0) {
-    return {
-      query,
-      results: [],
-      stats: {
-        retrieved,
-        exactDuplicates,
-        embedded: 0,
-        nearDuplicates: 0,
-        belowThreshold: 0,
-        dim: 0,
-        model: '',
-        tokens: 0,
-        embedLatencyMs: 0,
-        cacheHits: 0,
-      },
-      exa: searchResponse,
-    };
+    return emptyReport(query, searchResponse, retrieved, exactDuplicates);
   }
 
-  const texts = unique.map((result) => resultToEmbedText(result, embedText));
+  const textOptions: EmbedTextOptions = chunking
+    ? { prefer: 'text', maxChars: CHUNKED_EMBED_MAX_CHARS, ...embedText }
+    : { ...embedText };
+
+  const documents = unique.map((result) => resultToEmbedText(result, textOptions));
+
+  // Flatten every passage into one request, tracking which result each came
+  // from so scores can be pooled back per result.
+  const passages: string[] = [];
+  const ownerOfPassage: number[] = [];
+  const passageIndexInDoc: number[] = [];
+
+  documents.forEach((document, docIndex) => {
+    const parts = chunking ? chunkText(document, chunkOptions) : [];
+    if (parts.length === 0) {
+      passages.push(document);
+      ownerOfPassage.push(docIndex);
+      passageIndexInDoc.push(0);
+      return;
+    }
+
+    parts.forEach((part, partIndex) => {
+      passages.push(part.text);
+      ownerOfPassage.push(docIndex);
+      passageIndexInDoc.push(partIndex);
+    });
+  });
 
   // The query rides along in the same batch, so ranking costs one round trip.
-  const embedResult = await voxell.embed([query, ...texts], {
+  const embedResult = await voxell.embed([query, ...passages], {
     ...(model ? { model } : {}),
     ...(signal ? { signal } : {}),
   });
 
-  const [queryVector, ...resultVectors] = embedResult.embeddings;
+  const [queryVector, ...passageVectors] = embedResult.embeddings;
   if (!queryVector) throw new Error('Voxell returned no embedding for the query.');
 
-  const scored = unique.map((result, index) => ({
-    result,
-    originalRank: index,
-    embeddedText: texts[index] as string,
-    vector: resultVectors[index] as number[],
-    score: cosineSimilarity(queryVector, resultVectors[index] as number[]),
+  // Relevance is the best passage; identity (for dedupe and clustering) is the
+  // whole document, so one strong paragraph cannot make two articles look like
+  // the same story.
+  const perDocument = documents.map(() => ({
+    vectors: [] as number[][],
+    best: { score: -Infinity, index: 0, text: '' },
+    count: 0,
   }));
+
+  passageVectors.forEach((vector, i) => {
+    const owner = perDocument[ownerOfPassage[i] as number] as (typeof perDocument)[number];
+    const score = cosineSimilarity(queryVector, vector);
+
+    owner.vectors.push(vector);
+    owner.count += 1;
+    if (score > owner.best.score) {
+      owner.best = {
+        score,
+        index: passageIndexInDoc[i] as number,
+        text: passages[i] as string,
+      };
+    }
+  });
+
+  const scored = unique.map((result, index) => {
+    const doc = perDocument[index] as (typeof perDocument)[number];
+    return {
+      result,
+      originalRank: index,
+      embeddedText: documents[index] as string,
+      identity: doc.vectors.length === 1 ? (doc.vectors[0] as number[]) : centroid(doc.vectors),
+      score: doc.best.score,
+      best: doc.best,
+      chunkCount: doc.count,
+    };
+  });
 
   // Rank by semantic similarity, keeping Exa's order as the tiebreaker.
   const rankedOrder = scored
@@ -187,17 +301,17 @@ export async function researchSearch(
 
   const groups = dedupe
     ? collapseNearDuplicates(
-        scored.map((entry) => entry.vector),
+        scored.map((entry) => entry.identity),
         { threshold: dedupeThreshold, order: rankedOrder },
       )
     : rankedOrder.map((index) => ({ representative: index, duplicates: [] }));
 
   let nearDuplicates = 0;
-  let results: RankedResult[] = groups.map((group, newRank) => {
+  let survivors = groups.map((group, newRank) => {
     const entry = scored[group.representative] as (typeof scored)[number];
     nearDuplicates += group.duplicates.length;
 
-    return {
+    const ranked: RankedResult = {
       result: entry.result,
       score: entry.score,
       originalRank: entry.originalRank,
@@ -208,23 +322,56 @@ export async function researchSearch(
       })),
       embeddedText: entry.embeddedText,
     };
+
+    if (chunking) {
+      ranked.chunkCount = entry.chunkCount;
+      ranked.bestChunk = {
+        text: entry.best.text,
+        index: entry.best.index,
+        score: entry.best.score,
+      };
+    }
+
+    return { ranked, identity: entry.identity };
   });
 
-  const beforeThreshold = results.length;
+  const beforeThreshold = survivors.length;
   if (minScore !== undefined) {
-    results = results.filter((entry) => entry.score >= minScore);
+    survivors = survivors.filter((entry) => entry.ranked.score >= minScore);
   }
-  const belowThreshold = beforeThreshold - results.length;
+  const belowThreshold = beforeThreshold - survivors.length;
 
-  if (topK !== undefined) results = results.slice(0, topK);
+  if (topK !== undefined) survivors = survivors.slice(0, topK);
+
+  const results = survivors.map((entry) => entry.ranked);
+
+  let clusters: ResearchCluster[] | undefined;
+  if (cluster !== false && results.length > 0) {
+    const clusterOptions: ClusterOptions =
+      typeof cluster === 'object' ? cluster : { threshold: DEFAULT_CLUSTER_THRESHOLD };
+
+    clusters = clusterVectors(
+      survivors.map((entry) => entry.identity),
+      clusterOptions,
+    ).map((group) => ({
+      label:
+        (results[group.exemplar] as RankedResult).result.title ??
+        (results[group.exemplar] as RankedResult).result.url,
+      members: group.members,
+      exemplar: group.exemplar,
+      cohesion: group.cohesion,
+    }));
+  }
 
   return {
     query,
     results,
+    ...(clusters ? { clusters } : {}),
     stats: {
       retrieved,
       exactDuplicates,
-      embedded: texts.length + 1,
+      embedded: passages.length + 1,
+      chunks: passages.length,
       nearDuplicates,
       belowThreshold,
       dim: embedResult.dim,

@@ -36,6 +36,21 @@ function makeResult(marker: string, url: string): ExaResult {
   return { id: url, url, title: marker, highlights: [`${marker} excerpt about the topic`] };
 }
 
+/**
+ * A result whose full text buries one relevant passage in filler — the shape
+ * chunking exists to handle.
+ */
+function makeLongResult(marker: string, url: string): ExaResult {
+  const filler = `${'IRRELEVANT padding sentence about unrelated matters. '.repeat(20)}`;
+  return {
+    id: url,
+    url,
+    title: 'A long document',
+    highlights: ['a short highlight'],
+    text: `${filler}\n\n${marker} is discussed in detail in this passage.\n\n${filler}`,
+  };
+}
+
 interface Harness {
   exa: ExaClient;
   voxell: VoxellClient;
@@ -289,5 +304,152 @@ describe('researchSearch', () => {
     await researchSearch(h.exa, h.voxell, { query: QUERY, model: 'pro' });
 
     expect(h.embedBodies[0]!.model).toBe('pro');
+  });
+});
+
+describe('researchSearch with chunking', () => {
+  it('splits long results into passages and scores by the best one', async () => {
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      chunk: { maxChars: 400, overlapChars: 0 },
+    });
+
+    const entry = report.results[0]!;
+    expect(entry.chunkCount).toBeGreaterThan(1);
+    expect(entry.bestChunk).toBeDefined();
+    // The winning passage is the one that actually mentions the topic.
+    expect(entry.bestChunk!.text).toContain('ALPHA');
+    expect(entry.bestChunk!.score).toBeCloseTo(1, 6);
+  });
+
+  it('asks Exa for full text when chunking, and highlights when not', async () => {
+    const withChunks = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+    await researchSearch(withChunks.exa, withChunks.voxell, { query: QUERY, chunk: true });
+    expect(withChunks.searchBodies[0]!['contents']).toMatchObject({
+      text: { maxCharacters: expect.any(Number) },
+    });
+
+    const withoutChunks = harness([makeResult('ALPHA', 'https://example.com/a')]);
+    await researchSearch(withoutChunks.exa, withoutChunks.voxell, { query: QUERY });
+    expect(withoutChunks.searchBodies[0]!['contents']).toEqual({ highlights: true });
+  });
+
+  it('embeds more passages than results, and reports the count', async () => {
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      chunk: { maxChars: 400, overlapChars: 0 },
+    });
+
+    expect(report.stats.chunks).toBeGreaterThan(1);
+
+    // One request for the query plus every passage. The count sent can be
+    // lower than `chunks` because the client embeds repeated text once — the
+    // fixture's filler paragraphs are identical, so they collapse.
+    expect(h.embedBodies).toHaveLength(1);
+    expect(h.embedBodies[0]!.texts[0]).toBe(QUERY);
+    expect(h.embedBodies[0]!.texts.length).toBeGreaterThan(1);
+    expect(h.embedBodies[0]!.texts.length).toBeLessThanOrEqual(report.stats.chunks + 1);
+    expect(new Set(h.embedBodies[0]!.texts).size).toBe(h.embedBodies[0]!.texts.length);
+  });
+
+  it('leaves bestChunk unset and one vector per result when chunking is off', async () => {
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
+
+    expect(report.results[0]!.bestChunk).toBeUndefined();
+    expect(report.results[0]!.chunkCount).toBeUndefined();
+    expect(report.stats.chunks).toBe(1);
+  });
+
+  it('never sends a blank passage, which the embeddings API 502s on', async () => {
+    const h = harness([
+      makeLongResult('ALPHA', 'https://example.com/long'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ]);
+
+    await researchSearch(h.exa, h.voxell, { query: QUERY, chunk: true });
+
+    for (const text of h.embedBodies[0]!.texts) expect(text.trim()).not.toBe('');
+  });
+});
+
+describe('researchSearch with clustering', () => {
+  it('groups results into themes', async () => {
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('BETA', 'https://other.com/beta'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+      makeResult('DELTA', 'https://example.com/delta'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      cluster: { threshold: 0.9 },
+    });
+
+    expect(report.clusters).toBeDefined();
+    // ALPHA/BETA are 5 degrees apart; GAMMA and DELTA are far from both.
+    expect(report.clusters!.length).toBeGreaterThan(1);
+    const biggest = report.clusters![0]!;
+    expect(biggest.members.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('indexes cluster members into the final results array', async () => {
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      cluster: true,
+      dedupe: false,
+    });
+
+    for (const cluster of report.clusters!) {
+      for (const member of cluster.members) {
+        expect(report.results[member]).toBeDefined();
+      }
+      expect(cluster.members).toContain(cluster.exemplar);
+    }
+  });
+
+  it('labels each cluster with its exemplar title', async () => {
+    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY, cluster: true });
+
+    expect(report.clusters![0]!.label).toBe('ALPHA');
+  });
+
+  it('omits clusters entirely when not requested', async () => {
+    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
+
+    expect(report.clusters).toBeUndefined();
+  });
+
+  it('clusters only what survives dedupe and topK', async () => {
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('BETA', 'https://other.com/beta'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      cluster: true,
+      topK: 1,
+    });
+
+    expect(report.results).toHaveLength(1);
+    expect(report.clusters!.flatMap((c) => c.members)).toEqual([0]);
   });
 });

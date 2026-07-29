@@ -9,14 +9,21 @@
  */
 
 import http from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { ExaClient } from '../../src/exa/client.js';
 import { VoxellClient } from '../../src/voxell/client.js';
 import { researchSearch } from '../../src/research/pipeline.js';
+import { DEFAULT_CLUSTER_THRESHOLD } from '../../src/research/cluster.js';
 import { cosineSimilarity } from '../../src/research/similarity.js';
+import { FileVectorStore } from '../../src/store/file.js';
+import { synthesize } from '../../src/synthesis/synthesize.js';
+import type { Completer } from '../../src/synthesis/types.js';
 import type { ExaResult } from '../../src/exa/types.js';
 
 vi.setConfig({ testTimeout: 60_000 });
@@ -188,5 +195,198 @@ describe.skipIf(!enabled)('research pipeline against live Voxell', () => {
 
     const filtered = await researchSearch(exa, voxell, { query: QUERY, minScore: 0.99 });
     expect(filtered.results.length).toBeLessThan(report.results.length);
+  });
+});
+
+/** A long page where a single passage is on-topic and the rest is not. */
+const BURIED: ExaResult = {
+  id: 'buried',
+  url: 'https://example.com/buried',
+  title: 'Engineering blog: infrastructure notes',
+  highlights: ['Assorted notes from the platform team.'],
+  text: [
+    'Our Kubernetes upgrade went smoothly this quarter. We moved from 1.28 to 1.30 across all clusters, and the rollout took three weeks with no customer-visible downtime. The node pools were drained one at a time.',
+    'We also migrated the CI runners to a new instance family, which cut build times by roughly eighteen percent. Cache hit rates improved after we moved the layer cache to local NVMe.',
+    'On retrieval quality: we now maintain a golden dataset of question and passage pairs, and we measure recall at k and mean reciprocal rank on every change to the RAG retrieval stage. Regressions block the deploy.',
+    'The office move is scheduled for next month. Desks will be assigned by team, and the new space has more meeting rooms.',
+    'Finally, we upgraded Postgres to 16 and enabled logical replication for the analytics read replica.',
+  ].join('\n\n'),
+};
+
+const OFF_TOPIC_PAIR: ExaResult[] = [
+  {
+    id: 'k8s-1',
+    url: 'https://example.com/k8s-networking',
+    title: 'Debugging Kubernetes pod networking',
+    highlights: [
+      'CNI plugin misconfiguration is the most common cause of pods failing to reach each other across nodes.',
+    ],
+  },
+  {
+    id: 'k8s-2',
+    url: 'https://example.com/service-mesh',
+    title: 'Service mesh sidecar resource tuning',
+    highlights: [
+      'Envoy sidecars default to generous CPU limits; tuning them down reclaims significant cluster capacity.',
+    ],
+  },
+];
+
+describe.skipIf(!enabled)('chunking against live Voxell', () => {
+  it('finds the one relevant passage buried in an off-topic page', async () => {
+    const server = http.createServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ requestId: 'r', results: [BURIED] }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const buriedExa = new ExaClient({ apiKey: 'stub', baseUrl: `http://127.0.0.1:${port}` });
+
+    try {
+      const chunked = await researchSearch(buriedExa, voxell, {
+        query: QUERY,
+        chunk: { maxChars: 400, overlapChars: 0 },
+      });
+      const whole = await researchSearch(buriedExa, voxell, { query: QUERY });
+
+      const best = chunked.results[0]!.bestChunk!;
+
+      // The winning passage is the retrieval-quality paragraph, not the
+      // Kubernetes or office-move ones.
+      expect(best.text).toMatch(/recall at k|golden dataset/i);
+      expect(chunked.results[0]!.chunkCount).toBeGreaterThan(1);
+
+      // And scoring the best passage beats averaging the whole page — the
+      // entire reason chunking exists.
+      expect(chunked.results[0]!.score).toBeGreaterThan(whole.results[0]!.score);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+});
+
+describe.skipIf(!enabled)('clustering against live Voxell', () => {
+  it('separates two genuinely different topics', async () => {
+    const server = http.createServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            requestId: 'r',
+            results: [FIXTURES[1], FIXTURES[3], ...OFF_TOPIC_PAIR],
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const mixedExa = new ExaClient({ apiKey: 'stub', baseUrl: `http://127.0.0.1:${port}` });
+
+    try {
+      const report = await researchSearch(mixedExa, voxell, {
+        query: 'retrieval quality and infrastructure operations',
+        cluster: true,
+        dedupe: false,
+      });
+
+      expect(report.clusters).toBeDefined();
+      expect(report.clusters!.length).toBeGreaterThanOrEqual(2);
+
+      // The two Kubernetes pages belong together, and apart from the RAG ones.
+      const clusterOf = (needle: string): number =>
+        report.clusters!.findIndex((c) =>
+          c.members.some((m) => report.results[m]!.result.url.includes(needle)),
+        );
+
+      expect(clusterOf('k8s-networking')).toBe(clusterOf('service-mesh'));
+      expect(clusterOf('rag-eval')).not.toBe(clusterOf('k8s-networking'));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it('places the default threshold between same-topic and cross-topic pairs', async () => {
+    // The calibration the clustering default rests on. Same-topic article
+    // pairs are far less similar than restatements of one story, which is why
+    // this threshold is well below the dedupe one.
+    const { embeddings } = await voxell.embed([
+        `${FIXTURES[1]!.title} ${FIXTURES[1]!.highlights!.join(' ')}`,
+        `${FIXTURES[3]!.title} ${FIXTURES[3]!.highlights!.join(' ')}`,
+        `${OFF_TOPIC_PAIR[0]!.title} ${OFF_TOPIC_PAIR[0]!.highlights!.join(' ')}`,
+      `${OFF_TOPIC_PAIR[1]!.title} ${OFF_TOPIC_PAIR[1]!.highlights!.join(' ')}`,
+    ]);
+
+    const sameTopic = [
+      cosineSimilarity(embeddings[0]!, embeddings[1]!),
+      cosineSimilarity(embeddings[2]!, embeddings[3]!),
+    ];
+    const crossTopic = [
+      cosineSimilarity(embeddings[0]!, embeddings[2]!),
+      cosineSimilarity(embeddings[0]!, embeddings[3]!),
+      cosineSimilarity(embeddings[1]!, embeddings[2]!),
+      cosineSimilarity(embeddings[1]!, embeddings[3]!),
+    ];
+
+    expect(Math.min(...sameTopic)).toBeGreaterThan(DEFAULT_CLUSTER_THRESHOLD);
+    expect(Math.max(...crossTopic)).toBeLessThan(DEFAULT_CLUSTER_THRESHOLD);
+  });
+});
+
+describe.skipIf(!enabled)('full pipeline into synthesis, with live Voxell', () => {
+  it('feeds real ranked results into synthesis and validates the citations', async () => {
+    const report = await researchSearch(exa, voxell, { query: QUERY, cluster: true, topK: 3 });
+
+    // The completer is stubbed (no Anthropic key needed) but everything
+    // upstream of it is real: real embeddings, real ranking, real dedupe.
+    const seen: { system: string; prompt: string }[] = [];
+    const completer: Completer = async (request) => {
+      seen.push({ system: request.system, prompt: request.prompt });
+      // Cite the first two real sources, plus one that does not exist.
+      return { text: 'Grounded claim [1] and another [2]. A fabricated one [99].' };
+    };
+
+    const synthesis = await synthesize(report, { completer });
+
+    // The prompt carried the actual retrieved URLs, not placeholders.
+    for (const entry of report.results) {
+      expect(seen[0]!.prompt).toContain(entry.result.url);
+    }
+
+    expect(synthesis.sources).toHaveLength(report.results.length);
+    expect(synthesis.sources[0]!.cited).toBe(true);
+    expect(synthesis.invalidMarkers).toEqual([99]);
+    expect(synthesis.uncitedMarkers).toEqual([3]);
+  });
+
+  it('persists real embeddings to disk and reuses them on a second run', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'pipeline-live-'));
+    const path = join(dir, 'vectors.jsonl');
+
+    try {
+      const first = new VoxellClient({ store: new FileVectorStore({ path }), maxRetries: 1 });
+      const cold = await researchSearch(exa, first, { query: QUERY });
+      expect(cold.stats.tokens).toBeGreaterThan(0);
+
+      // A different client and store instance, same file.
+      const second = new VoxellClient({ store: new FileVectorStore({ path }), maxRetries: 1 });
+      const warm = await researchSearch(exa, second, { query: QUERY });
+
+      expect(warm.stats.tokens).toBe(0);
+      expect(warm.stats.cacheHits).toBe(cold.stats.chunks + 1);
+      // Ranking must survive the float32 round trip.
+      expect(warm.results.map((r) => r.result.url)).toEqual(
+        cold.results.map((r) => r.result.url),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

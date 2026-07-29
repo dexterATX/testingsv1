@@ -16,6 +16,11 @@ export interface EmbedTextOptions {
   maxChars?: number;
   /** Prepend the result title. Defaults to true. */
   includeTitle?: boolean;
+  /**
+   * Which content field to reach for first. `highlights` (the default) is
+   * right for one-vector-per-result; `text` gives chunking more to work with.
+   */
+  prefer?: 'highlights' | 'text';
 }
 
 const DEFAULT_MAX_CHARS = 8_000;
@@ -40,7 +45,9 @@ export function resultToEmbedText(result: ExaResult, options: EmbedTextOptions =
 
   if (includeTitle && result.title) parts.push(tidy(result.title));
 
-  if (result.highlights?.length) {
+  if (options.prefer === 'text' && result.text) {
+    parts.push(tidy(result.text));
+  } else if (result.highlights?.length) {
     parts.push(...result.highlights.map(tidy));
   } else if (result.summary) {
     parts.push(tidy(result.summary));

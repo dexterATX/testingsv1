@@ -11,3 +11,6 @@ coverage/
 npm-debug.log*
 .DS_Store
 .vitest/
+
+# local embedding cache written by the synthesis example
+.cache/
