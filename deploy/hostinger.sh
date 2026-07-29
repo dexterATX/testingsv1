@@ -171,6 +171,18 @@ prompt_key() {
     read -rsp "    $name${required:+ (required)}: " value
   fi
   echo
+
+  # Terminals with bracketed paste wrap what you paste in \e[200~ ... \e[201~,
+  # and `read -rs` happily captures those bytes because you cannot see them.
+  # The key then looks right in the file and fails auth at first use, which is
+  # a long way from the cause. Strip control characters and surrounding
+  # whitespace; no API key legitimately contains either.
+  # `tr` alone is not enough: it drops the ESC byte and leaves the literal
+  # "[200~" / "[201~" behind, still glued to the key.
+  value="$(printf '%s' "$value" \
+    | tr -d '[:cntrl:]' \
+    | sed -e 's/\[20[01]~//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
   if [ -z "$value" ] && [ -n "$required" ]; then
     die "$name is required"
   fi
@@ -360,6 +372,32 @@ info "service running, listening on 127.0.0.1:$APP_PORT"
 curl -fsS -m 10 "http://127.0.0.1:$APP_PORT/api/config" >/dev/null \
   && info "health check OK" \
   || die "service is up but /api/config did not answer"
+
+# /api/config only reports which keys are *present*, so a mistyped key sails
+# through it and fails at the user's first search instead — by which point the
+# deploy looks finished and the cause is a long way behind. Run one real query
+# through the whole path. Costs a single small search; SKIP_KEY_CHECK=1 opts out.
+if [ -z "${SKIP_KEY_CHECK:-}" ]; then
+  info "checking the keys actually work"
+  probe="$(curl -fsS -m 120 -X POST "http://127.0.0.1:$APP_PORT/api/run" \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"retrieval evaluation","numResults":1,"cluster":false,"synthesize":false}' \
+    2>/dev/null || true)"
+
+  if printf '%s' "$probe" | grep -q '"type":"error"'; then
+    die "the service is running, but a live search failed:
+
+    $(printf '%s' "$probe" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p' | head -1)
+
+    A key in $ENV_FILE is wrong. Pasting into a hidden prompt is the usual
+    cause. Fix it and restart, then re-run this script for the proxy:
+        \$EDITOR $ENV_FILE
+        systemctl restart $SERVICE"
+  fi
+  # The write-up key is deliberately not exercised — it is optional, and a
+  # synthesis costs real tokens on every redeploy.
+  info "search and embeddings both answered"
+fi
 
 # ------------------------------------------------------------------ proxy ---
 
