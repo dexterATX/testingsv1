@@ -35,10 +35,16 @@ pipeline, and the vector stores have **no runtime dependencies** — just Node
 ```bash
 cp .env.example .env     # EXA_API_KEY, VOXELL_API_KEY, + ANTHROPIC_API_KEY or FIREWORKS_API_KEY
 npm install
-npm run check            # typecheck + 349 tests, no network, no keys needed
+npm run check            # typecheck + 367 tests, no network, no keys needed
 ```
 
-Then a live run:
+Then either the web UI:
+
+```bash
+npm run web          # → http://127.0.0.1:4317
+```
+
+or the CLI:
 
 ```bash
 npm run example:synthesis "how are teams evaluating RAG retrieval quality?"
@@ -51,6 +57,36 @@ is no dotenv dependency.
 > **Voxell auth:** the header is `Authorization: Bearer <key>`. A bare key
 > 401s. See [the reference](docs/voxell-api-reference.md#authentication) — this
 > is the most common mistake with that API.
+
+## Web UI
+
+```bash
+npm run web
+```
+
+A local page for running research and watching it happen. The pipeline runs
+server-side and streams each stage over SSE, so **Exa's raw hits are on screen
+seconds before the ranking finishes** — you can start reading links while the
+embeddings are still in flight.
+
+Sections fill in as the run progresses:
+
+1. **Pipeline** — each stage with live counts (results, passages, tokens, cache hits)
+2. **What Exa returned** — the unmodified hit list, in Exa's own order
+3. **After reranking & dedupe** — scores, rank movement (`↑9`), the matching
+   excerpt, and which sources were collapsed into each result
+4. **Themes** — clusters, when enabled
+5. **Write-up** — the synthesis, with `[n]` markers linked to their sources
+
+Fabricated citations are called out in red rather than quietly rendered.
+
+**Keys never reach the browser.** The page talks only to localhost; the server
+holds the credentials and sends back results. It binds to `127.0.0.1` for that
+reason — override with `HOST` only if you understand the exposure. Closing the
+tab aborts the in-flight run.
+
+Set `PORT` to change the port. The embedding cache is written to
+`.cache/vectors.jsonl`, so re-running a question costs nothing.
 
 ## The research pipeline
 
@@ -97,6 +133,20 @@ What it does, in order:
 Each result carries `score`, `originalRank`, `rankDelta` (positive = the rerank
 promoted it), absorbed `duplicates`, and — with chunking on — `bestChunk`, the
 passage that actually matched. `report.exa` keeps the raw response.
+
+Pass `onEvent` to observe stages as they finish rather than waiting for the
+whole run — this is what the web UI streams:
+
+```ts
+await researchSearch(exa, voxell, {
+  query,
+  onEvent: (event) => {
+    if (event.type === 'search:done') console.log(`${event.results.length} hits`);
+  },
+});
+```
+
+A throwing handler is swallowed: a broken progress listener never fails the run.
 
 ### Chunking
 
@@ -334,8 +384,10 @@ src/
   store/              vector stores (memory, file)
   research/           chunk, similarity, rerank, dedupe, cluster, pipeline
   synthesis/          Completer interface + Anthropic/Fireworks adapters + citation checks
+  server/             local HTTP server + SSE progress stream
+web/                  the UI (plain HTML/CSS/JS, no build step)
 test/
-  exa/ voxell/ fireworks/ store/ …           349 tests — no network, no keys
+  exa/ voxell/ fireworks/ server/ store/ …   367 tests — no network, no keys
   live/                                       57 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
@@ -346,8 +398,9 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (349 tests) |
+| `npm test` | Offline suite (367 tests) |
 | `npm run test:live` | Live API tests — gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
+| `npm run web` | **Local research UI** on http://127.0.0.1:4317 |
 | `npm run build` | Compile to `dist/` |
 | `npm run example:synthesis` | **Full pipeline + grounded write-up** |
 | `npm run example:research` | Exa → Voxell rerank and dedupe |

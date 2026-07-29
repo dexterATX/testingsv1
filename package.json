@@ -30,7 +30,8 @@
     "example:stream": "node --import tsx --env-file-if-exists=.env examples/streaming.ts",
     "test:live": "vitest run test/live",
     "example:research": "node --import tsx --env-file-if-exists=.env examples/research-search.ts",
-    "example:synthesis": "node --import tsx --env-file-if-exists=.env examples/research-synthesis.ts"
+    "example:synthesis": "node --import tsx --env-file-if-exists=.env examples/research-synthesis.ts",
+    "web": "node --import tsx --env-file-if-exists=.env src/server/main.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

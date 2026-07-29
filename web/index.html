@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research Toolkit</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128269;</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>Research Toolkit</h1>
+      <p class="sub">Exa retrieves · Voxell reranks and dedupes · an LLM writes it up</p>
+    </header>
+
+    <main>
+      <form id="run-form" class="panel query-panel">
+        <label class="field query-field">
+          <span class="label">Research question</span>
+          <textarea
+            id="query"
+            name="query"
+            rows="2"
+            placeholder="how are engineering teams evaluating retrieval quality in RAG systems?"
+            required
+          ></textarea>
+        </label>
+
+        <div class="options">
+          <label class="field">
+            <span class="label">Results</span>
+            <input id="numResults" type="number" min="1" max="100" value="25" />
+          </label>
+
+          <label class="field">
+            <span class="label">Keep top</span>
+            <input id="topK" type="number" min="1" max="100" value="10" />
+          </label>
+
+          <label class="field">
+            <span class="label">Search type</span>
+            <select id="searchType">
+              <option value="">auto (default)</option>
+              <option value="fast">fast</option>
+              <option value="instant">instant</option>
+              <option value="deep-lite">deep-lite</option>
+              <option value="deep">deep</option>
+            </select>
+          </label>
+
+          <label class="field toggle">
+            <input id="chunk" type="checkbox" />
+            <span>Chunk pages<small>slower, better on long articles</small></span>
+          </label>
+
+          <label class="field toggle">
+            <input id="cluster" type="checkbox" checked />
+            <span>Cluster themes</span>
+          </label>
+
+          <label class="field toggle">
+            <input id="synthesize" type="checkbox" checked />
+            <span>Write it up</span>
+          </label>
+
+          <label class="field" id="provider-field" hidden>
+            <span class="label">Model</span>
+            <select id="provider"></select>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="submit" id="run">Run research</button>
+          <button type="button" id="cancel" hidden>Stop</button>
+          <span id="config-warning" class="warning" hidden></span>
+        </div>
+      </form>
+
+      <section class="panel progress-panel" id="progress-panel" hidden>
+        <div class="progress-head">
+          <h2>Pipeline</h2>
+          <span id="elapsed" class="mono muted"></span>
+        </div>
+        <ol id="stages" class="stages"></ol>
+        <div id="error" class="error" hidden></div>
+      </section>
+
+      <!-- Exa's raw hits, shown as soon as they land. -->
+      <section class="panel" id="exa-panel" hidden>
+        <div class="panel-head">
+          <h2>What Exa returned <span id="exa-count" class="pill"></span></h2>
+          <button type="button" class="linkish" id="toggle-exa">collapse</button>
+        </div>
+        <p class="muted small" id="exa-meta"></p>
+        <ol id="exa-list" class="link-list"></ol>
+      </section>
+
+      <section class="panel" id="ranked-panel" hidden>
+        <div class="panel-head">
+          <h2>After reranking &amp; dedupe <span id="ranked-count" class="pill"></span></h2>
+        </div>
+        <p class="muted small" id="ranked-meta"></p>
+        <ol id="ranked-list" class="result-list"></ol>
+      </section>
+
+      <section class="panel" id="themes-panel" hidden>
+        <div class="panel-head"><h2>Themes</h2></div>
+        <div id="themes"></div>
+      </section>
+
+      <section class="panel" id="synthesis-panel" hidden>
+        <div class="panel-head">
+          <h2>Write-up</h2>
+          <span id="synthesis-meta" class="mono muted"></span>
+        </div>
+        <div id="synthesis-warning" class="error" hidden></div>
+        <article id="synthesis" class="prose"></article>
+        <ol id="synthesis-sources" class="source-list"></ol>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

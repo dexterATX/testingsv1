@@ -15,6 +15,7 @@ import type { VoxellClient } from '../voxell/client.js';
 import type { EmbedModelName } from '../voxell/types.js';
 import { chunkText, type ChunkOptions } from './chunk.js';
 import { clusterVectors, DEFAULT_CLUSTER_THRESHOLD, type ClusterOptions } from './cluster.js';
+import { safeEmitter, type ResearchEventHandler } from './events.js';
 import { DEFAULT_DEDUPE_THRESHOLD, collapseNearDuplicates } from './dedupe.js';
 import { centroid, cosineSimilarity } from './similarity.js';
 import { canonicalizeUrl, resultToEmbedText, type EmbedTextOptions } from './text.js';
@@ -46,6 +47,12 @@ export interface ResearchOptions {
   minScore?: number;
   /** Keep only the top N after ranking and dedupe. */
   topK?: number;
+  /**
+   * Called as each stage completes, so a caller can show intermediate state —
+   * notably the raw Exa hits, which land well before the final ranking. A
+   * throwing handler is ignored rather than failing the run.
+   */
+  onEvent?: ResearchEventHandler;
   /** Aborts both the Exa and Voxell calls. */
   signal?: AbortSignal;
 }
@@ -176,8 +183,11 @@ export async function researchSearch(
     cluster = false,
     minScore,
     topK,
+    onEvent,
     signal,
   } = options;
+
+  const emit = safeEmitter(onEvent);
 
   if (typeof query !== 'string' || query.trim() === '') {
     throw new Error('`query` is required and must be a non-empty string.');
@@ -191,6 +201,8 @@ export async function researchSearch(
     ? { text: { maxCharacters: CHUNKED_EMBED_MAX_CHARS }, highlights: true }
     : { highlights: true };
 
+  emit({ type: 'search:start', query, numResults });
+
   const searchResponse = await exa.search(query, {
     numResults,
     contents: defaultContents,
@@ -199,6 +211,13 @@ export async function researchSearch(
   });
 
   const retrieved = searchResponse.results.length;
+
+  emit({
+    type: 'search:done',
+    requestId: searchResponse.requestId,
+    results: searchResponse.results,
+    costDollars: searchResponse.costDollars,
+  });
 
   // Exact-URL duplicates first — free, and they would otherwise each cost an
   // embedding only to be collapsed a step later.
@@ -212,6 +231,8 @@ export async function researchSearch(
   }
 
   const exactDuplicates = retrieved - unique.length;
+  emit({ type: 'dedupe:exact', removed: exactDuplicates, kept: unique.length });
+
   if (unique.length === 0) {
     return emptyReport(query, searchResponse, retrieved, exactDuplicates);
   }
@@ -244,10 +265,22 @@ export async function researchSearch(
     });
   });
 
+  emit({ type: 'chunk:done', documents: documents.length, passages: passages.length });
+  emit({ type: 'embed:start', texts: passages.length + 1 });
+
   // The query rides along in the same batch, so ranking costs one round trip.
   const embedResult = await voxell.embed([query, ...passages], {
     ...(model ? { model } : {}),
     ...(signal ? { signal } : {}),
+  });
+
+  emit({
+    type: 'embed:done',
+    dim: embedResult.dim,
+    model: embedResult.model,
+    tokens: embedResult.tokens,
+    cacheHits: embedResult.cacheHits,
+    latencyMs: embedResult.latencyMs,
   });
 
   const [queryVector, ...passageVectors] = embedResult.embeddings;
@@ -299,6 +332,21 @@ export async function researchSearch(
           (scored[a] as (typeof scored)[number]).score || a - b,
     );
 
+  emit({
+    type: 'rerank:done',
+    ranked: rankedOrder.map((index, position) => {
+      const entry = scored[index] as (typeof scored)[number];
+      return {
+        url: entry.result.url,
+        title: entry.result.title ?? null,
+        score: entry.score,
+        originalRank: entry.originalRank,
+        rankDelta: entry.originalRank - position,
+        duplicateCount: 0,
+      };
+    }),
+  });
+
   const groups = dedupe
     ? collapseNearDuplicates(
         scored.map((entry) => entry.identity),
@@ -335,6 +383,8 @@ export async function researchSearch(
     return { ranked, identity: entry.identity };
   });
 
+  emit({ type: 'dedupe:near', collapsed: nearDuplicates, kept: survivors.length });
+
   const beforeThreshold = survivors.length;
   if (minScore !== undefined) {
     survivors = survivors.filter((entry) => entry.ranked.score >= minScore);
@@ -362,6 +412,19 @@ export async function researchSearch(
       cohesion: group.cohesion,
     }));
   }
+
+  if (clusters) {
+    emit({
+      type: 'cluster:done',
+      clusters: clusters.map((c) => ({
+        label: c.label,
+        members: c.members,
+        cohesion: c.cohesion,
+      })),
+    });
+  }
+
+  emit({ type: 'done', results: results.length });
 
   return {
     query,

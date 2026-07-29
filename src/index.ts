@@ -17,3 +17,4 @@ export * from './fireworks/index.js';
 export * from './research/index.js';
 export * from './store/index.js';
 export * from './synthesis/index.js';
+export * from './server/index.js';

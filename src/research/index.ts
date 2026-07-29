@@ -20,6 +20,14 @@ export type {
   ResearchReport,
 } from './pipeline.js';
 
+export { safeEmitter } from './events.js';
+export type {
+  ClusterPreview,
+  RankedPreview,
+  ResearchEvent,
+  ResearchEventHandler,
+} from './events.js';
+
 export { chunkText } from './chunk.js';
 export type { Chunk, ChunkOptions } from './chunk.js';
 
