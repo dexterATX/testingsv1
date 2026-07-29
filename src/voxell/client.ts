@@ -43,7 +43,7 @@ export interface VoxellClientOptions {
   apiKey?: string;
   /** Defaults to `process.env.VOXELL_BASE_URL` or `https://api.voxell.ai`. */
   baseUrl?: string;
-  /** Default model for `embed()`. Defaults to `turbo`. */
+  /** Default model for `embed()`. Falls back to `VOXELL_MODEL`, then `ultra-4k`. */
   model?: EmbedModelName;
   /** Texts per HTTP request. Defaults to 128. */
   batchSize?: number;
@@ -150,7 +150,7 @@ export class VoxellClient {
       throw new VoxellError('No global fetch available. Use Node 18+ or pass `fetch` explicitly.');
     }
 
-    this.defaultModel = options.model ?? DEFAULT_EMBED_MODEL;
+    this.defaultModel = options.model ?? process.env['VOXELL_MODEL'] ?? DEFAULT_EMBED_MODEL;
     this.batchSize = options.batchSize ?? LIMITS.defaultBatchSize;
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.onOversizedText = options.onOversizedText ?? 'error';
@@ -183,6 +183,17 @@ export class VoxellClient {
   /** Expected dimensionality for a model, or `undefined` if unmeasured. */
   static dimensionsFor(model: EmbedModelName): number | undefined {
     return MODEL_DIMENSIONS[model];
+  }
+
+  /**
+   * The model `embed()` uses when a call does not name one.
+   *
+   * Exposed because similarity thresholds depend on the model, so a caller
+   * that wants to pick a threshold has to be able to ask which model it is
+   * about to use — see `src/research/thresholds.ts`.
+   */
+  get model(): EmbedModelName {
+    return this.defaultModel;
   }
 
   /**

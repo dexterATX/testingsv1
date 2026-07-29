@@ -33,6 +33,7 @@ describe.skipIf(!enabled)('Voxell live API', () => {
     const result = await client().embed(['semantic search relevance'], { model: 'turbo' });
 
     expect(result.embeddings).toHaveLength(1);
+    // This call names `turbo` explicitly, so 1024 is the right literal here.
     expect(result.dim).toBe(1024);
     expect(result.embeddings[0]).toHaveLength(1024);
     expect(isNormalized(result.embeddings[0]!)).toBe(true);
@@ -122,7 +123,11 @@ describe.skipIf(!enabled)('Voxell live API', () => {
     const truncating = new VoxellClient({ onOversizedText: 'truncate', maxRetries: 1 });
     const result = await truncating.embed(['long input '.repeat(5_000)]);
 
-    expect(result.embeddings[0]).toHaveLength(1024);
+    // Derived from the client's model, not hard-coded: the default tier moved
+    // from 1024d turbo to 4096d ultra-4k and a literal here silently rotted.
+    // Derived from the model rather than hard-coded: the default tier moved
+    // from 1024d turbo to 4096d ultra-4k, and a literal here silently rotted.
+    expect(result.embeddings[0]).toHaveLength(VoxellClient.dimensionsFor(truncating.model)!);
   });
 
   it('accepts input right at the 32000-character ceiling', async () => {
@@ -164,7 +169,7 @@ describe.skipIf(!enabled)('FileVectorStore with live Voxell', () => {
       // compare by similarity rather than equality — the drift must be far
       // below anything the ranking thresholds care about.
       expect(cosineSimilarity(cold.embeddings[0]!, warm.embeddings[0]!)).toBeGreaterThan(0.9999);
-      expect(warm.embeddings[0]).toHaveLength(1024);
+      expect(warm.embeddings[0]).toHaveLength(VoxellClient.dimensionsFor(second.model)!);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

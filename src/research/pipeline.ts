@@ -14,10 +14,11 @@ import type { RequestOverrides } from '../http/transport.js';
 import type { VoxellClient } from '../voxell/client.js';
 import type { EmbedModelName } from '../voxell/types.js';
 import { chunkText, type ChunkOptions } from './chunk.js';
-import { clusterVectors, DEFAULT_CLUSTER_THRESHOLD, type ClusterOptions } from './cluster.js';
+import { clusterVectors, type ClusterOptions } from './cluster.js';
 import { safeEmitter, type ResearchEventHandler } from './events.js';
-import { DEFAULT_DEDUPE_THRESHOLD, collapseNearDuplicates } from './dedupe.js';
+import { collapseNearDuplicates } from './dedupe.js';
 import { centroid, cosineSimilarity } from './similarity.js';
+import { thresholdsFor } from './thresholds.js';
 import { canonicalizeUrl, resultToEmbedText, type EmbedTextOptions } from './text.js';
 
 export interface ResearchOptions {
@@ -39,7 +40,11 @@ export interface ResearchOptions {
   chunk?: boolean | ChunkOptions;
   /** Collapse near-duplicates. Defaults to true. */
   dedupe?: boolean;
-  /** Cosine threshold for near-duplicates. Defaults to 0.92. */
+  /**
+   * Cosine threshold for near-duplicates. Defaults to a value measured for
+   * whichever embedding model is in use — see `./thresholds.ts`, and prefer
+   * that over a literal here, since the right number moves with the model.
+   */
   dedupeThreshold?: number;
   /** Group surviving results into themes. Pass `true` for defaults. */
   cluster?: boolean | ClusterOptions;
@@ -179,7 +184,7 @@ export async function researchSearch(
     embedText,
     chunk = false,
     dedupe = true,
-    dedupeThreshold = DEFAULT_DEDUPE_THRESHOLD,
+    dedupeThreshold,
     cluster = false,
     minScore,
     topK,
@@ -192,6 +197,13 @@ export async function researchSearch(
   if (typeof query !== 'string' || query.trim() === '') {
     throw new Error('`query` is required and must be a non-empty string.');
   }
+
+  // Thresholds follow the model, so resolve which model is actually going to
+  // run before picking them — `model` here may be undefined, in which case the
+  // client's own default is what the vectors will come from.
+  const effectiveModel = model ?? voxell.model;
+  const thresholds = thresholdsFor(effectiveModel);
+  const nearDuplicateThreshold = dedupeThreshold ?? thresholds.dedupe;
 
   const chunking = chunk !== false;
   const chunkOptions: ChunkOptions = typeof chunk === 'object' ? chunk : {};
@@ -350,7 +362,7 @@ export async function researchSearch(
   const groups = dedupe
     ? collapseNearDuplicates(
         scored.map((entry) => entry.identity),
-        { threshold: dedupeThreshold, order: rankedOrder },
+        { threshold: nearDuplicateThreshold, order: rankedOrder },
       )
     : rankedOrder.map((index) => ({ representative: index, duplicates: [] }));
 
@@ -398,7 +410,7 @@ export async function researchSearch(
   let clusters: ResearchCluster[] | undefined;
   if (cluster !== false && results.length > 0) {
     const clusterOptions: ClusterOptions =
-      typeof cluster === 'object' ? cluster : { threshold: DEFAULT_CLUSTER_THRESHOLD };
+      typeof cluster === 'object' ? cluster : { threshold: thresholds.cluster };
 
     clusters = clusterVectors(
       survivors.map((entry) => entry.identity),

@@ -71,15 +71,44 @@ describe('embed', () => {
     expect(result.model).toBe('qwen3-native-28l');
   });
 
-  it('defaults to the turbo model and honors an override', async () => {
-    const stub = embedStub();
-    const client = makeClient(stub);
+  it('defaults to ultra-4k and honors an override', async () => {
+    // The default is the top tier, not the API's own `turbo`: it separates
+    // "same story" from "same topic" with about twice the margin, which is
+    // what dedupe needs. See src/research/thresholds.ts.
+    const before = process.env['VOXELL_MODEL'];
+    delete process.env['VOXELL_MODEL'];
 
-    await client.embed(['x']);
-    expect(stub.calls[0]!.body.model).toBe('turbo');
+    try {
+      const stub = embedStub();
+      const client = makeClient(stub);
 
-    await client.embed(['y'], { model: 'ultra-4k' });
-    expect(stub.calls[1]!.body.model).toBe('ultra-4k');
+      await client.embed(['x']);
+      expect(stub.calls[0]!.body.model).toBe('ultra-4k');
+
+      await client.embed(['y'], { model: 'turbo' });
+      expect(stub.calls[1]!.body.model).toBe('turbo');
+    } finally {
+      if (before === undefined) delete process.env['VOXELL_MODEL'];
+      else process.env['VOXELL_MODEL'] = before;
+    }
+  });
+
+  it('takes the default model from VOXELL_MODEL when set', async () => {
+    // Reading the environment is what lets the deployed service switch tiers
+    // without a code change; it also means this suite must control the var
+    // explicitly, or a developer with it exported would see the test above
+    // fail for no reason they could see.
+    const before = process.env['VOXELL_MODEL'];
+    process.env['VOXELL_MODEL'] = 'pro';
+
+    try {
+      const stub = embedStub();
+      await makeClient(stub).embed(['x']);
+      expect(stub.calls[0]!.body.model).toBe('pro');
+    } finally {
+      if (before === undefined) delete process.env['VOXELL_MODEL'];
+      else process.env['VOXELL_MODEL'] = before;
+    }
   });
 
   it('embedOne returns the bare vector', async () => {

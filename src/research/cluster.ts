@@ -15,6 +15,7 @@
  */
 
 import { centroid, cosineSimilarity } from './similarity.js';
+import { UNMEASURED_THRESHOLDS } from './thresholds.js';
 
 export interface Cluster {
   /** Indices of the member vectors. */
@@ -54,7 +55,11 @@ export interface ClusterOptions {
   maxClusters?: number;
 }
 
-export const DEFAULT_CLUSTER_THRESHOLD = 0.38;
+/**
+ * Fallback for callers that do not name a model. See `./thresholds.ts` for why
+ * a constant is a compromise here in a way it is not for dedupe.
+ */
+export const DEFAULT_CLUSTER_THRESHOLD = UNMEASURED_THRESHOLDS.cluster;
 
 /** Average pairwise similarity between two groups of vectors. */
 function averageLinkage(a: number[], b: number[], similarity: number[][]): number {

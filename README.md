@@ -35,7 +35,7 @@ pipeline, and the vector stores have **no runtime dependencies** — just Node
 ```bash
 cp .env.example .env     # EXA_API_KEY, VOXELL_API_KEY, + ANTHROPIC_API_KEY or FIREWORKS_API_KEY
 npm install
-npm run check            # typecheck + 379 tests, no network, no keys needed
+npm run check            # typecheck + 387 tests, no network, no keys needed
 ```
 
 Then either the web UI:
@@ -173,10 +173,10 @@ What it does, in order:
 |---|---|---|
 | `numResults` | 25 | Passed to Exa |
 | `search` | `{}` | Any `SearchOptions`, merged over the defaults |
-| `model` | client default | `turbo` / `pro` / `ultra-4k` |
+| `model` | `ultra-4k` | `turbo` (free) / `pro` / `ultra-4k`; or set `VOXELL_MODEL` |
 | `chunk` | `false` | `true`, or `{ maxChars, overlapChars, minChars }` |
 | `dedupe` | `true` | |
-| `dedupeThreshold` | `0.92` | Cosine at or above which two results are one story |
+| `dedupeThreshold` | per model | Cosine at or above which two results are one story — see below |
 | `cluster` | `false` | `true`, or `{ threshold, maxClusters }` |
 | `minScore` | — | Drop results below this similarity to the query |
 | `topK` | — | Keep the best N after ranking and dedupe |
@@ -216,20 +216,43 @@ scores the page higher than whole-document embedding does.
 
 ### Tuning the thresholds
 
-Both defaults are calibrated against real article text, not guessed:
+**A threshold belongs to the embedding model, not to the task.** Each model
+puts "the same story" and "the same topic" at different points on the cosine
+scale, so `src/research/thresholds.ts` keys them by model and the pipeline
+picks the right pair for whichever model is running.
 
-| Threshold | Default | Same-signal band | Cross-signal band |
+Measured through the pipeline's own text path over 45 results:
+
+| Model | True duplicate | Different articles, same topic | `dedupe` default |
 |---|---|---|---|
-| `dedupeThreshold` | 0.92 | Restatements of one story: >0.92 | Distinct articles: <0.92 |
-| `cluster.threshold` | 0.38 | Same topic: 0.42–0.49 | Different topics: 0.22–0.33 |
+| `ultra-4k` *(default)* | 0.980 | 0.823–0.895, max 0.908 | **0.94** |
+| `turbo` | 0.986 | 0.925–0.945, max 0.948 | **0.95** |
 
-Note how much narrower the clustering gap is. Topic similarity is genuinely
-fuzzier than duplicate detection, so **treat clusters as a navigation aid, not
-ground truth**, and expect to tune per corpus: raise the threshold if unrelated
-results get grouped, lower it if an obvious theme fragments.
+Both models separate the two cases, but `ultra-4k` leaves a 0.072 gap against
+turbo's 0.038 — which is the concrete reason it is the default. An earlier
+single default of 0.92 sat *inside* turbo's non-duplicate band, so distinct
+articles that merely shared a topic were being collapsed into each other.
 
-`test/live/pipeline.live.test.ts` asserts both gaps still exist — those are the
-tests that should fail first if Voxell changes models.
+Verified both ways: on a syndicated news story both models collapse four real
+duplicates at 0.979–0.995, and on twenty distinct articles about one topic
+neither collapses anything.
+
+`pro` is deliberately **not** in the table. Interpolating a number from its
+neighbours would look like a measurement and would not be one, so it falls
+through to a conservative default until somebody measures it.
+
+**Clustering is the weaker half, and its threshold is a compromise rather than
+a measurement.** The pairwise distribution moves a long way with the query: on
+a tightly-focused question every result sits between 0.67 and 0.95, while on a
+deliberately broad one nothing pairs above 0.78 and every result is its own
+theme. No single constant is right for both. Treat clusters as a navigation
+aid, not ground truth. Fixing it properly means clustering at a percentile of
+the observed similarities rather than a constant — a design change, not a
+retune.
+
+`test/research/thresholds.test.ts` pins every `dedupe` value between its
+model's measured bands, so a change that would resume over-collapsing fails
+the offline suite.
 
 ## Synthesis
 
@@ -438,7 +461,7 @@ src/
   server/             local HTTP server + SSE progress stream
 web/                  the UI (plain HTML/CSS/JS, no build step)
 test/
-  exa/ voxell/ fireworks/ server/ store/ …   379 tests — no network, no keys
+  exa/ voxell/ fireworks/ server/ store/ …   387 tests — no network, no keys
   live/                                       57 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
@@ -449,7 +472,7 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (379 tests) |
+| `npm test` | Offline suite (387 tests) |
 | `npm run test:live` | Live API tests — reads `.env`; gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
 | `npm run web` | **Local research UI** on http://127.0.0.1:4317 |
 | `npm run build` | Compile to `dist/` |

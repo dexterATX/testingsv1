@@ -8,6 +8,7 @@
  */
 
 import { cosineSimilarity } from './similarity.js';
+import { UNMEASURED_THRESHOLDS } from './thresholds.js';
 
 export interface DuplicateOf {
   index: number;
@@ -25,9 +26,10 @@ export interface DedupeOptions {
   /**
    * Cosine similarity at or above which two items are the same story.
    *
-   * Calibrated against Voxell `turbo`: distinct-but-related documents land
-   * near 0.65–0.75, so 0.92 collapses restatements without merging genuinely
-   * different sources. Raise it if legitimate results are being absorbed.
+   * The right value depends on which embedding model produced the vectors —
+   * see `./thresholds.ts`. Callers that know their model should pass
+   * `thresholdsFor(model).dedupe`; the default here is the conservative
+   * fallback, because this function cannot see where its vectors came from.
    */
   threshold?: number;
   /**
@@ -37,7 +39,11 @@ export interface DedupeOptions {
   order?: number[];
 }
 
-export const DEFAULT_DEDUPE_THRESHOLD = 0.92;
+/**
+ * Fallback for callers that do not name a model. Intentionally strict: over-
+ * collapsing destroys results the user came for, under-collapsing repeats one.
+ */
+export const DEFAULT_DEDUPE_THRESHOLD = UNMEASURED_THRESHOLDS.dedupe;
 
 /**
  * Greedily groups vectors into near-duplicate clusters.

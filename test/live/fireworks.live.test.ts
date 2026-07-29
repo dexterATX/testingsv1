@@ -211,8 +211,29 @@ describe.skipIf(!enabled)('synthesis against live Fireworks', () => {
       maxTokens: 4_000,
     });
 
-    // A model answering a RAG-metrics question should not cite the bread page.
     expect(synthesis.invalidMarkers).toEqual([]);
-    expect(synthesis.uncitedMarkers).toContain(3);
+
+    // Assert the *bookkeeping*, not the model's judgement.
+    //
+    // This used to assert that marker 3 — the bread page — went uncited, which
+    // is a bet on what the model chooses to do: measured over repeated runs it
+    // failed roughly one time in three, because sometimes it cites the
+    // off-topic source anyway. A live test that flips a coin teaches nobody
+    // anything. What must hold every time is that `uncitedMarkers` agrees with
+    // the text, and that is entirely our code.
+    const appears = (marker: number): boolean =>
+      new RegExp(`\\[[^\\]]*\\b${marker}\\b[^\\]]*\\]`).test(synthesis.text);
+
+    for (const source of synthesis.sources) {
+      expect(source.cited, `source ${source.marker} cited flag`).toBe(appears(source.marker));
+      expect(
+        synthesis.uncitedMarkers.includes(source.marker),
+        `source ${source.marker} in uncitedMarkers`,
+      ).toBe(!appears(source.marker));
+    }
+
+    // The off-topic source was offered, so it is either cited or reported as
+    // ignored — never silently dropped from the accounting.
+    expect(synthesis.sources.map((s) => s.marker)).toContain(3);
   });
 });

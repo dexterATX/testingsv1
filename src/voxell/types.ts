@@ -21,8 +21,18 @@ export type EmbedModel = (typeof EMBED_MODELS)[number];
 /** Any model string the API accepts, including the OpenAI-compatible aliases. */
 export type EmbedModelName = EmbedModel | (string & {});
 
-/** The model used when the request omits `model`. */
-export const DEFAULT_EMBED_MODEL: EmbedModel = 'turbo';
+/**
+ * The model this client uses when a call does not name one.
+ *
+ * `ultra-4k` — the top tier — rather than the API's own default of `turbo`,
+ * because it separates "the same story" from "the same topic" with roughly
+ * twice the margin, which is exactly the discrimination dedupe and clustering
+ * need. See `src/research/thresholds.ts` for the measurements.
+ *
+ * It is not free: `turbo` is unmetered, `ultra-4k` bills per token. Set
+ * `VOXELL_MODEL=turbo` to go back.
+ */
+export const DEFAULT_EMBED_MODEL: EmbedModel = 'ultra-4k';
 
 /**
  * Output dimensions per model, measured against the live API.
