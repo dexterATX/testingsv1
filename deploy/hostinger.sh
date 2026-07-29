@@ -78,8 +78,18 @@ listening_on() {
   ss -ltnpH "sport = :$1" 2>/dev/null | head -1 || true
 }
 
+# On a re-run it is our own service holding $APP_PORT, which is the whole
+# point of a re-run. Stop it first, so the check below means "something else
+# has this port" — and so the restart later picks up the new build rather than
+# leaving the old process serving.
+if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+  info "stopping the running $SERVICE to redeploy"
+  systemctl stop "$SERVICE"
+fi
+
 if [ -n "$(listening_on "$APP_PORT" || true)" ]; then
-  die "port $APP_PORT is already in use. Re-run with APP_PORT=<free port>."
+  die "port $APP_PORT is held by something other than $SERVICE.
+    Re-run with APP_PORT=<free port>."
 fi
 
 http_owner="$(listening_on 80 || true)"
@@ -244,7 +254,12 @@ if [ -d "$APP_DIR/.git" ]; then
   info "updating existing checkout"
   run_as_app git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   run_as_app git -C "$APP_DIR" fetch --depth 1 origin "$REPO_REF"
-  run_as_app git -C "$APP_DIR" checkout -B "$REPO_REF" FETCH_HEAD
+
+  # `--force`, because this directory is a deployment artifact and not
+  # somewhere to keep work. Without it a plain checkout refuses on any local
+  # modification, so one hotfix edited in place on the server wedges every
+  # redeploy afterwards behind "commit your changes or stash them".
+  run_as_app git -C "$APP_DIR" checkout --force -B "$REPO_REF" FETCH_HEAD
 else
   install -d -o "$APP_USER" -g "$APP_USER" "$APP_DIR"
   run_as_app git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$APP_DIR"
