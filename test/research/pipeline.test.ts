@@ -393,11 +393,37 @@ describe('researchSearch with clustering', () => {
       cluster: { threshold: 0.9 },
     });
 
-    expect(report.clusters).toBeDefined();
-    // ALPHA/BETA are 5 degrees apart; GAMMA and DELTA are far from both.
-    expect(report.clusters!.length).toBeGreaterThan(1);
-    const biggest = report.clusters![0]!;
-    expect(biggest.members.length).toBeGreaterThanOrEqual(2);
+    // ALPHA/BETA are 5 degrees apart and group. GAMMA (60°) and DELTA (89°)
+    // are far from them and from each other at this threshold, so they are
+    // singletons — and a singleton is not a theme, so only the real group is
+    // reported.
+    const titlesIn = (index: number): string[] =>
+      report.clusters![index]!.members.map((m) => report.results[m]!.result.title!);
+
+    expect(report.clusters).toHaveLength(1);
+    expect(titlesIn(0).sort()).toEqual(['ALPHA', 'BETA']);
+  });
+
+  it('reports several themes when several groups genuinely form', async () => {
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('BETA', 'https://other.com/beta'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+      makeResult('DELTA', 'https://example.com/delta'),
+    ]);
+
+    // At 0.85, GAMMA and DELTA (29° apart, cos ~0.87) pair up as well.
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      cluster: { threshold: 0.85 },
+    });
+
+    expect(report.clusters).toHaveLength(2);
+    const grouped = report.clusters!.map((c) =>
+      c.members.map((m) => report.results[m]!.result.title!).sort().join('+'),
+    );
+    expect(grouped.sort()).toEqual(['ALPHA+BETA', 'DELTA+GAMMA']);
   });
 
   it('indexes cluster members into the final results array', async () => {
@@ -421,11 +447,40 @@ describe('researchSearch with clustering', () => {
   });
 
   it('labels each cluster with its exemplar title', async () => {
-    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+    // Needs a split that actually partitions: ALPHA and BETA are 5 degrees
+    // apart and group, GAMMA is far from both. A lone result would be
+    // suppressed as uninformative — see the test below.
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('BETA', 'https://other.com/beta'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ]);
 
-    const report = await researchSearch(h.exa, h.voxell, { query: QUERY, cluster: true });
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      cluster: true,
+      dedupe: false,
+    });
 
-    expect(report.clusters![0]!.label).toBe('ALPHA');
+    expect(report.clusters!.map((c) => c.label)).toContain('ALPHA');
+  });
+
+  it('reports no themes when the results do not actually partition', async () => {
+    // One cluster holding everything is the result list printed twice, and a
+    // pile of singletons is no grouping at all. Both are what agglomerative
+    // clustering returns for a continuum, which is what one query's worth of
+    // web results usually is — so an empty array is the honest answer.
+    const single = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+    const oneReport = await researchSearch(single.exa, single.voxell, {
+      query: QUERY,
+      cluster: true,
+    });
+    expect(oneReport.clusters).toEqual([]);
+
+    // Distinct from "clustering was never requested", which stays undefined.
+    const notAsked = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+    const plain = await researchSearch(notAsked.exa, notAsked.voxell, { query: QUERY });
+    expect(plain.clusters).toBeUndefined();
   });
 
   it('omits clusters entirely when not requested', async () => {
@@ -441,15 +496,27 @@ describe('researchSearch with clustering', () => {
       makeResult('ALPHA', 'https://example.com/alpha'),
       makeResult('BETA', 'https://other.com/beta'),
       makeResult('GAMMA', 'https://example.com/gamma'),
+      makeResult('DELTA', 'https://example.com/delta'),
     ]);
 
+    // topK 3 drops DELTA, and leaves a split that still partitions, so the
+    // member indices are checkable against the trimmed results array.
     const report = await researchSearch(h.exa, h.voxell, {
       query: QUERY,
       cluster: true,
-      topK: 1,
+      dedupe: false,
+      topK: 3,
     });
 
-    expect(report.results).toHaveLength(1);
-    expect(report.clusters!.flatMap((c) => c.members)).toEqual([0]);
+    expect(report.results).toHaveLength(3);
+
+    // Only real groups are reported, so GAMMA (a singleton) is absent —
+    // every index that *is* present must still address the trimmed array.
+    const members = report.clusters!.flatMap((c) => c.members).sort((a, b) => a - b);
+    expect(members.length).toBeGreaterThan(0);
+    for (const m of members) {
+      expect(m).toBeLessThan(report.results.length);
+      expect(report.results[m]).toBeDefined();
+    }
   });
 });

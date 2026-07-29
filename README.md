@@ -75,7 +75,7 @@ Sections fill in as the run progresses:
 2. **What the search returned** — the unmodified hit list, in the order Exa gave it
 3. **After reranking & dedupe** — scores, rank movement (`↑9`), the matching
    excerpt, and which sources were collapsed into each result
-4. **Themes** — clusters, when enabled
+4. **Themes** — real groups only, and nothing at all when the results have no group structure (which is common)
 5. **Write-up** — the synthesis, with `[n]` markers linked to their sources
 
 Fabricated citations are called out in red rather than quietly rendered.
@@ -241,8 +241,16 @@ neither collapses anything.
 neighbours would look like a measurement and would not be one, so it falls
 through to a conservative default until somebody measures it.
 
-**Clustering is the weaker half, and its threshold is a compromise rather than
-a measurement.** The pairwise distribution moves a long way with the query: on
+**Clustering only reports actual groups.** A single cluster holding every
+result is the result list printed twice, and a crowd of one-member "themes" is
+no grouping at all — both are what agglomerative clustering returns for a
+continuum, and one query's worth of web results usually is one. So groups of
+two or more are reported and everything else is dropped; an empty list means
+"no theme structure here", which is true, where a lone all-inclusive theme
+would be misleading. Expect no themes on a focused question and a few on a
+deliberately broad one.
+
+**Its threshold remains a compromise rather than a measurement.** The pairwise distribution moves a long way with the query: on
 a tightly-focused question every result sits between 0.67 and 0.95, while on a
 deliberately broad one nothing pairs above 0.78 and every result is its own
 theme. No single constant is right for both. Treat clusters as a navigation

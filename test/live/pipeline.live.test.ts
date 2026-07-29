@@ -21,6 +21,7 @@ import { VoxellClient } from '../../src/voxell/client.js';
 import { thresholdsFor } from '../../src/research/thresholds.js';
 import { researchSearch } from '../../src/research/pipeline.js';
 import { cosineSimilarity } from '../../src/research/similarity.js';
+import { resultToEmbedText } from '../../src/research/text.js';
 import { FileVectorStore } from '../../src/store/file.js';
 import { synthesize } from '../../src/synthesis/synthesize.js';
 import type { Completer } from '../../src/synthesis/types.js';
@@ -301,7 +302,7 @@ describe.skipIf(!enabled)('chunking against live Voxell', () => {
  * These fixtures span two unrelated topics, so their same-topic pairs land far
  * lower than a real single-query result set's. The default targets the latter.
  */
-const FIXTURE_CLUSTER_THRESHOLD = 0.49;
+const FIXTURE_CLUSTER_THRESHOLD = 0.415;
 
 describe.skipIf(!enabled)('clustering against live Voxell', () => {
   it('separates two genuinely different topics', async () => {
@@ -324,7 +325,7 @@ describe.skipIf(!enabled)('clustering against live Voxell', () => {
     try {
       // An explicit threshold, because these fixtures are deliberately more
       // diverse than anything one Exa query returns: two topics that share
-      // nothing, where same-topic pairs sit near 0.51 and cross-topic at 0.46. Real single-query
+      // nothing, where same-topic pairs sit near 0.42 and cross-topic at 0.41. Real single-query
       // results all sit above 0.65, which is the regime the per-model default
       // targets. No constant serves both — see src/research/thresholds.ts.
       const report = await researchSearch(mixedExa, voxell, {
@@ -356,11 +357,17 @@ describe.skipIf(!enabled)('clustering against live Voxell', () => {
     // it does *not* establish is a single constant that finds it, because
     // where the gap sits moves with the input — these fixtures put it near
     // 0.5, a real single-query result set puts it above 0.8.
+    // Embedded through `resultToEmbedText`, the same function the pipeline
+    // uses. Composing the text by hand here instead put same-topic pairs at
+    // 0.513 while the pipeline saw 0.424 for the very same documents, and a
+    // threshold picked from the first number does not work in the second.
+    // Measuring anything other than what the pipeline actually embeds is how
+    // both of this file's thresholds went stale before.
     const { embeddings } = await voxell.embed([
-        `${FIXTURES[1]!.title} ${FIXTURES[1]!.highlights!.join(' ')}`,
-        `${FIXTURES[3]!.title} ${FIXTURES[3]!.highlights!.join(' ')}`,
-        `${OFF_TOPIC_PAIR[0]!.title} ${OFF_TOPIC_PAIR[0]!.highlights!.join(' ')}`,
-      `${OFF_TOPIC_PAIR[1]!.title} ${OFF_TOPIC_PAIR[1]!.highlights!.join(' ')}`,
+      resultToEmbedText(FIXTURES[1]!),
+      resultToEmbedText(FIXTURES[3]!),
+      resultToEmbedText(OFF_TOPIC_PAIR[0]!),
+      resultToEmbedText(OFF_TOPIC_PAIR[1]!),
     ]);
 
     const sameTopic = [
@@ -379,11 +386,10 @@ describe.skipIf(!enabled)('clustering against live Voxell', () => {
     expect(Math.min(...sameTopic)).toBeGreaterThan(FIXTURE_CLUSTER_THRESHOLD);
     expect(Math.max(...crossTopic)).toBeLessThan(FIXTURE_CLUSTER_THRESHOLD);
 
-    // And the per-model default is above this gap, which is why the test
-    // above has to pass a threshold rather than take the default. This is a
-    // known limitation recorded, not a bug hidden: a constant cannot serve
-    // both regimes, and clustering at a percentile of the observed
-    // similarities is the fix.
+    // The gap is real but narrow — 0.406 to 0.424 as measured. That thinness
+    // is the point: it is why no constant serves every input, and why the
+    // per-model default (tuned for one query's worth of results, which pair
+    // far higher) sits well above this one.
     expect(thresholdsFor(voxell.model).cluster).toBeGreaterThan(Math.min(...sameTopic));
   });
 });

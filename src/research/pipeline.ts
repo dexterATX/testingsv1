@@ -412,17 +412,43 @@ export async function researchSearch(
     const clusterOptions: ClusterOptions =
       typeof cluster === 'object' ? cluster : { threshold: thresholds.cluster };
 
-    clusters = clusterVectors(
+    const grouped = clusterVectors(
       survivors.map((entry) => entry.identity),
       clusterOptions,
-    ).map((group) => ({
-      label:
-        (results[group.exemplar] as RankedResult).result.title ??
-        (results[group.exemplar] as RankedResult).result.url,
-      members: group.members,
-      exemplar: group.exemplar,
-      cohesion: group.cohesion,
-    }));
+    );
+
+    /*
+     * A theme is a group. Anything that is not a group is not reported.
+     *
+     * Two degenerate shapes come back constantly and are worth nothing to a
+     * reader: one cluster holding every result, which is the result list
+     * printed twice, and a crowd of one-member "themes", which is no grouping
+     * at all. Both are what agglomerative clustering returns when the input is
+     * a *continuum* rather than distinct groups — and one query's worth of web
+     * results usually is one. Measured on twenty real results for a single
+     * question, no threshold produces a balanced split: it goes from one blob
+     * (≤0.75) to a blob plus singletons (0.80) to near-total fragmentation
+     * (0.90), with nothing useful in between.
+     *
+     * So: keep only groups of two or more, and drop the lot if that leaves
+     * nothing or leaves a single group that swallowed everything. An empty
+     * array then means "these results have no theme structure" — a true
+     * statement about the data, where a lone all-inclusive theme is a
+     * misleading one.
+     */
+    const groups = grouped.filter((group) => group.members.length > 1);
+    const swallowedEverything = groups.length === 1 && groups[0]!.members.length === results.length;
+
+    clusters = swallowedEverything
+      ? []
+      : groups.map((group) => ({
+          label:
+            (results[group.exemplar] as RankedResult).result.title ??
+            (results[group.exemplar] as RankedResult).result.url,
+          members: group.members,
+          exemplar: group.exemplar,
+          cohesion: group.cohesion,
+        }));
   }
 
   if (clusters) {

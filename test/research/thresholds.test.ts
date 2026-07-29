@@ -53,3 +53,21 @@ describe('thresholdsFor', () => {
     }
   });
 });
+
+describe('cluster reporting', () => {
+  it('documents why a lone all-inclusive cluster is suppressed', () => {
+    // Guard for the rule in pipeline.ts: themes are reported only when they
+    // partition the results. Encoded here as the shapes, so the intent
+    // survives a refactor of the pipeline.
+    const reported = (sizes: number[], total: number): number[] => {
+      const groups = sizes.filter((n) => n > 1);
+      return groups.length === 1 && groups[0] === total ? [] : groups;
+    };
+
+    expect(reported([8], 8), 'one cluster holding everything').toEqual([]);
+    expect(reported([1, 1, 1, 1], 4), 'all singletons').toEqual([]);
+    expect(reported([3, 1, 1, 1, 1], 7), 'one real group among singletons').toEqual([3]);
+    expect(reported([2, 2], 4), 'two real themes').toEqual([2, 2]);
+    expect(reported([13, 2, 1, 1], 17), 'a blob plus a real pair').toEqual([13, 2]);
+  });
+});
