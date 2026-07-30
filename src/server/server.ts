@@ -373,6 +373,7 @@ export function serializeReport(report: ResearchReport): Record<string, unknown>
       embedded: stats.embedded,
       chunks: stats.chunks,
       nearDuplicates: stats.nearDuplicates,
+      demotedByDomain: stats.demotedByDomain,
       belowThreshold: stats.belowThreshold,
       dim: stats.dim,
       tokens: stats.tokens,

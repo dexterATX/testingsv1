@@ -9,8 +9,10 @@ import {
   availableProviders,
   availableWriters,
   parseRunRequest,
+  serializeReport,
   startServer,
 } from '../../src/server/server.js';
+import type { ResearchReport } from '../../src/research/pipeline.js';
 import { namesAProvider } from '../../src/server/redact.js';
 
 describe('parseRunRequest', () => {
@@ -268,5 +270,27 @@ describe('parseRunRequest extraQueries', () => {
     expect(parseRunRequest({ query: 'main', extraQueries: 'not an array' }).extraQueries).toEqual(
       [],
     );
+  });
+});
+
+describe('serializeReport stats', () => {
+  it('forwards demotedByDomain, which the field-by-field copy would drop', () => {
+    // serializeReport copies stats explicitly so a name-bearing field added to
+    // the pipeline is excluded until opted in. That fail-safe is deliberate,
+    // and it means every genuinely wanted new field needs a test like this —
+    // demotedByDomain shipped as `undefined` to the browser without one.
+    const stats: ResearchReport['stats'] = {
+      retrieved: 10, exactDuplicates: 1, embedded: 9, chunks: 9,
+      nearDuplicates: 2, demotedByDomain: 3, belowThreshold: 0,
+      dim: 4096, model: 'qwen3-native-36l', tokens: 100, embedLatencyMs: 5, cacheHits: 0,
+    };
+
+    const wire = serializeReport({
+      query: 'q', results: [], stats, exa: { requestId: 'r', results: [] },
+    }) as { stats: Record<string, unknown> };
+
+    expect(wire.stats['demotedByDomain']).toBe(3);
+    // And the model name is still withheld.
+    expect(wire.stats['model']).toBeUndefined();
   });
 });

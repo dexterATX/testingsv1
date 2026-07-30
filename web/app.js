@@ -160,7 +160,9 @@ function renderRanked(report) {
   const s = report.stats;
   el.rankedMeta.textContent =
     `${s.retrieved} retrieved · ${s.exactDuplicates} duplicate URLs · ` +
-    `${s.nearDuplicates} near-duplicates collapsed · ${s.chunks} passages embedded ` +
+    `${s.nearDuplicates} near-duplicates collapsed · ` +
+    (s.demotedByDomain ? `${s.demotedByDomain} demoted to spread publishers · ` : '') +
+    `${s.chunks} passages embedded ` +
     `(${s.cacheHits} cached) · ${s.tokens} tokens · ${s.dim}-dim vectors`;
 
   report.results.forEach((entry, index) => {
