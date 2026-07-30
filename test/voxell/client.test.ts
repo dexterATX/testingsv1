@@ -439,3 +439,44 @@ describe('batching by total characters', () => {
     expect(result.embeddings).toEqual(texts.map((t) => fakeVector(t)));
   });
 });
+
+describe('request pacing', () => {
+  it('keeps at most two batches in flight', async () => {
+    // The API serialises, so extra concurrency does not parallelise the work —
+    // it only makes later requests wait longer before the server reaches them,
+    // and it is that wait the timeout measures. Four in flight took the
+    // slowest request from 15.6s to 51.6s against a 60s timeout, which is the
+    // EmbeddingTimeoutError this guards against.
+    let inFlight = 0;
+    let peak = 0;
+
+    const fetchStub = async (_input: unknown, init?: RequestInit): Promise<Response> => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+
+      const body = JSON.parse(String(init?.body)) as { texts: string[] };
+      return jsonResponse({
+        dim: 8,
+        embeddings: body.texts.map(fakeVector),
+        latency_ms: 1,
+        model: 'qwen3-native-28l',
+        tokens: body.texts.length,
+      });
+    };
+
+    const client = new VoxellClient({
+      apiKey: API_KEY,
+      fetch: fetchStub as unknown as typeof globalThis.fetch,
+      sleep: noSleep,
+      batchSize: 1,
+    });
+
+    await client.embed(Array.from({ length: 12 }, (_, i) => `text ${i}`));
+
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(2);
+  });
+
+});

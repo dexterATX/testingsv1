@@ -194,6 +194,34 @@ Practical consequences:
   and do not expect byte-identical results when re-embedding a corpus in
   different batch sizes.
 
+### Throughput: the API serialises
+
+Requests are processed **one at a time**. Concurrency pipelines the network
+round trip and nothing else, while multiplying how long any single request
+waits before the server reaches it. Measured with full 256,000-character
+batches of `ultra-4k`:
+
+| In flight | Total | Slowest single request |
+|---|---|---|
+| 1 | 15.6 s | 15.6 s |
+| 2 | 27.2 s | 27.2 s |
+| 4 | 51.6 s | **51.6 s** |
+
+Four batches finish in ~52 s at concurrency 4 and ~54 s at concurrency 2 —
+within noise — but the worst-case *per-request* wait halves. Since a timeout
+measures that per-request wait, the client defaults to **2 in flight and a
+120 s timeout**. The previous 4-and-60 s combination put the slowest request
+at 51.6 s against a 60 s ceiling, which is how a merely slow run surfaced as
+`EmbeddingTimeoutError`.
+
+Per-batch cost scales close to linearly with characters, so there is no
+throughput reason to prefer big batches either:
+
+| Batch | `turbo` | `ultra-4k` |
+|---|---|---|
+| 16 texts / 32 k chars | 1.9 s | 2.1 s |
+| 128 texts / 256 k chars | 3.7 s | 13.1 s |
+
 ### Response headers
 
 Measured 2026-07-29. An earlier revision of this file said there were no

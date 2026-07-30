@@ -34,8 +34,34 @@ import {
 export type { RequestOverrides };
 
 const DEFAULT_BASE_URL = 'https://api.voxell.ai';
-const DEFAULT_TIMEOUT_MS = 60_000;
-const DEFAULT_CONCURRENCY = 4;
+/**
+ * Generous, because the timeout exists to catch a *hung* request and the API
+ * serialises: a batch that waits its turn behind others is working normally,
+ * and killing it at 60 s turned a slow run into `EmbeddingTimeoutError`.
+ * Measured worst case below is ~27 s; this leaves better than 4x headroom.
+ */
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+/**
+ * Two, not four.
+ *
+ * The API processes one request at a time, so concurrency buys pipelining of
+ * network overhead and nothing more — while multiplying how long any single
+ * request waits before the server reaches it. Measured with full 256,000-char
+ * batches of `ultra-4k`:
+ *
+ * | in flight | total | slowest single request |
+ * |---|---|---|
+ * | 1 | 15.6 s | 15.6 s |
+ * | 2 | 27.2 s | 27.2 s |
+ * | 4 | 51.6 s | **51.6 s** |
+ *
+ * Four batches take ~52 s at concurrency 4 and ~54 s at concurrency 2 — within
+ * noise of each other — but the worst-case per-request wait halves. Since it
+ * is that per-request wait the timeout measures, 2 is strictly the better
+ * trade: the same throughput with half the exposure.
+ */
+const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_MAX_CACHE_ENTRIES = 10_000;
 
 export interface VoxellClientOptions {
@@ -47,9 +73,9 @@ export interface VoxellClientOptions {
   model?: EmbedModelName;
   /** Texts per HTTP request. Defaults to 128. */
   batchSize?: number;
-  /** Batches in flight at once. Defaults to 4. */
+  /** Batches in flight at once. Defaults to 2 — the API serialises, see below. */
   concurrency?: number;
-  /** Per-request timeout in ms. Defaults to 60000. */
+  /** Per-request timeout in ms. Defaults to 120000. */
   timeoutMs?: number;
   /** Retries on 429 / 5xx / network errors. Defaults to 2. */
   maxRetries?: number;
