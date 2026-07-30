@@ -137,6 +137,24 @@ untouched, so a failed deploy cannot take a live site down with it.
 sudo PUBLIC_PORT=8443 bash deploy/hostinger.sh
 ```
 
+### Updating a deployment
+
+The same command. It fetches the branch, rebuilds, and restarts the unit:
+
+```bash
+sudo bash deploy/hostinger.sh
+```
+
+Your keys are kept — an existing `/etc/research-toolkit.env` is never
+rewritten, so nothing is re-typed. The port and login choices are kept too:
+they are recorded in `/etc/research-toolkit.deploy` and used as the defaults
+next time, because otherwise a routine update would move a site deployed on
+8443 back to 443 and put a password in front of one deliberately left open.
+Passing a variable still overrides the remembered value.
+
+Re-running with `UI_AUTH=password` and no `UI_PASSWORD` generates a *new*
+password and prints it. Pass `UI_PASSWORD` to keep the old one.
+
 **The default is a password**, because the page has no login of its own and the
 process holds live API keys: an open URL means every visitor spends them, and
 hostnames on shared provider domains get scanned. `UI_AUTH=none` is a supported

@@ -30,10 +30,20 @@ ENV_FILE="${ENV_FILE:-/etc/research-toolkit.env}"
 APP_PORT="${APP_PORT:-4317}"
 SERVICE="research-toolkit"
 
+# Choices from the last run, so an update does not silently undo them.
+#
+# Without this, re-running to pick up new code moves a site deployed on 8443
+# back to 443 and puts a password in front of one deliberately left open —
+# because the defaults below apply to *every* run, not just the first. The
+# environment still wins, so passing a value changes it.
+STATE_FILE="${STATE_FILE:-/etc/research-toolkit.deploy}"
+# shellcheck disable=SC1090
+[ -f "$STATE_FILE" ] && . "$STATE_FILE"
+
 # Public port for the site. 443 is the default; set another when the box
 # already serves something on 443 and you want this alongside it rather than
 # instead of it.
-PUBLIC_PORT="${PUBLIC_PORT:-443}"
+PUBLIC_PORT="${PUBLIC_PORT:-${LAST_PUBLIC_PORT:-443}}"
 
 # `password` puts one basic-auth login in front of the UI; `none` leaves it
 # open to anyone with the URL.
@@ -42,8 +52,8 @@ PUBLIC_PORT="${PUBLIC_PORT:-443}"
 # process holds live API keys — an open URL means anyone who finds it can spend
 # them, and hostnames on shared provider domains get port-scanned. `none` is a
 # supported choice, not an accident, and the script says so on the way out.
-UI_AUTH="${UI_AUTH:-password}"
-UI_USER="${UI_USER:-research}"
+UI_AUTH="${UI_AUTH:-${LAST_UI_AUTH:-password}}"
+UI_USER="${UI_USER:-${LAST_UI_USER:-research}}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -100,7 +110,24 @@ info "port 443: ${https_owner:-free}"
 if [ "$PUBLIC_PORT" != 443 ]; then
   public_owner="$(listening_on "$PUBLIC_PORT" || true)"
   info "port $PUBLIC_PORT: ${public_owner:-free}"
-  [ -z "$public_owner" ] || die "port $PUBLIC_PORT is taken. Re-run with PUBLIC_PORT=<free port>."
+
+  # Same trap the app port had: on a re-run it is *our own* Caddy holding this,
+  # which is what redeploying means. The check exists to catch a stranger, so
+  # recognise our own site file before refusing. Without this, updating an
+  # existing deployment fails on the port it deliberately chose last time.
+  if [ -n "$public_owner" ]; then
+    case "$public_owner" in
+      *caddy*)
+        [ -f "/etc/caddy/conf.d/$SERVICE.caddy" ] \
+          || die "port $PUBLIC_PORT is held by a Caddy this script did not configure.
+    Re-run with PUBLIC_PORT=<free port>."
+        info "  (that is this deployment's own proxy — redeploying over it)"
+        ;;
+      *)
+        die "port $PUBLIC_PORT is taken. Re-run with PUBLIC_PORT=<free port>."
+        ;;
+    esac
+  fi
 fi
 
 case "$UI_AUTH" in
@@ -513,6 +540,17 @@ CADDY
     PUBLIC_URL=''
     ;;
 esac
+
+# Written last, once the choices have actually been applied — so a run that
+# failed halfway does not leave the next one defaulting to a layout that was
+# never built. No secrets here, only the shape of the deployment.
+{
+  printf '# Written by deploy/hostinger.sh. Defaults for the next run.\n'
+  printf 'LAST_PUBLIC_PORT=%s\n' "$PUBLIC_PORT"
+  printf 'LAST_UI_AUTH=%s\n'     "$UI_AUTH"
+  printf 'LAST_UI_USER=%s\n'     "$UI_USER"
+} > "$STATE_FILE"
+chmod 644 "$STATE_FILE"
 
 # ----------------------------------------------------------------- report ---
 
