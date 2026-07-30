@@ -291,6 +291,17 @@ git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 
 if [ -d "$APP_DIR/.git" ]; then
   info "updating existing checkout"
+
+  # Anything root ran in here by hand — a `sudo git fetch` to grab a fix
+  # quickly — leaves root-owned objects under .git, and the *next* deploy dies
+  # with "insufficient permission for adding an object to repository database"
+  # after already downloading the pack. The directory belongs to $APP_USER, so
+  # asserting that is both correct and the repair; -R is cheap next to npm ci.
+  if [ -n "$(find "$APP_DIR/.git" ! -user "$APP_USER" -print -quit 2>/dev/null)" ]; then
+    info "repairing ownership left by a root-run git command"
+    chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+  fi
+
   run_as_app git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   run_as_app git -C "$APP_DIR" fetch --depth 1 origin "$REPO_REF"
 
