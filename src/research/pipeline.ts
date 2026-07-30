@@ -489,8 +489,14 @@ export async function researchSearch(
     searchRequests.map((request) =>
       exa.search(request.query, {
         numResults,
-        contents: defaultContents,
         ...request.options,
+        /*
+         * Merged per key, not replaced. A caller passing `contents: { text }`
+         * used to wipe `highlights` — and highlights are what the first pass
+         * embeds, so the ranking would quietly fall through to a third text
+         * regime none of the thresholds were calibrated on.
+         */
+        contents: { ...defaultContents, ...(request.options?.contents ?? {}) },
         ...(signal ? { signal } : {}),
       }),
     ),

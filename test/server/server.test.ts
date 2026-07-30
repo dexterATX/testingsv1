@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   availableProviders,
   availableWriters,
+  mergeSearches,
   parseRunRequest,
   serializeReport,
   startServer,
@@ -270,6 +271,64 @@ describe('parseRunRequest extraQueries', () => {
     expect(parseRunRequest({ query: 'main', extraQueries: 'not an array' }).extraQueries).toEqual(
       [],
     );
+  });
+});
+
+describe('parseRunRequest searchType', () => {
+  it('accepts a known type and drops an empty one', () => {
+    expect(parseRunRequest({ query: 'q', searchType: 'deep-lite' }).searchType).toBe('deep-lite');
+    expect(parseRunRequest({ query: 'q', searchType: '' }).searchType).toBeUndefined();
+    expect(parseRunRequest({ query: 'q' }).searchType).toBeUndefined();
+  });
+
+  it('rejects an unknown type here, not several layers down', () => {
+    // It used to be cast through and fail inside the search client, with a
+    // message about a request body rather than about the dropdown.
+    expect(() => parseRunRequest({ query: 'q', searchType: 'turbo' })).toThrow(
+      /Unknown search type/,
+    );
+  });
+});
+
+describe('parseRunRequest expand', () => {
+  it('is off unless the page asks for it', () => {
+    // Expansion spends three extra searches. Anything short of an explicit
+    // `true` — absent, "true", 1 — must not opt a run into that.
+    expect(parseRunRequest({ query: 'main' }).expand).toBe(false);
+    expect(parseRunRequest({ query: 'main', expand: 'true' }).expand).toBe(false);
+    expect(parseRunRequest({ query: 'main', expand: 1 }).expand).toBe(false);
+    expect(parseRunRequest({ query: 'main', expand: true }).expand).toBe(true);
+  });
+});
+
+describe('mergeSearches', () => {
+  it('keeps both sources, typed first', () => {
+    expect(mergeSearches(['typed'], ['generated'])).toEqual(['typed', 'generated']);
+  });
+
+  it('drops a generated query that repeats one the user typed', () => {
+    // expandQuery dedupes against the original question only — it never sees
+    // the "Also search for" box, so this collision can only be caught here.
+    expect(mergeSearches(['RAG evaluation metrics'], ['rag evaluation metrics!', 'novel'])).toEqual(
+      ['RAG evaluation metrics', 'novel'],
+    );
+  });
+
+  it('spends the cap on what the user typed, not on what the model wrote', () => {
+    const typed = Array.from({ length: 8 }, (_, i) => `typed ${i}`);
+    const merged = mergeSearches(typed, ['generated']);
+
+    expect(merged).toEqual(typed);
+  });
+
+  it('caps the combined fan-out', () => {
+    const merged = mergeSearches(
+      ['typed 0', 'typed 1'],
+      Array.from({ length: 10 }, (_, i) => `generated ${i}`),
+    );
+
+    expect(merged).toHaveLength(8);
+    expect(merged.slice(0, 2)).toEqual(['typed 0', 'typed 1']);
   });
 });
 

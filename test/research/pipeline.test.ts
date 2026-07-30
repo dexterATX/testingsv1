@@ -247,7 +247,7 @@ describe('researchSearch', () => {
     });
   });
 
-  it('lets the caller override the content mode', async () => {
+  it('merges caller content options over the defaults rather than replacing them', async () => {
     const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
 
     await researchSearch(h.exa, h.voxell, {
@@ -255,7 +255,23 @@ describe('researchSearch', () => {
       search: { contents: { text: { maxCharacters: 2000 } } },
     });
 
-    expect(h.searchBodies[0]!['contents']).toEqual({ text: { maxCharacters: 2000 } });
+    // Asking for text must not silently switch off highlights: the first pass
+    // embeds them, and dropping them changes what every score is computed on.
+    expect(h.searchBodies[0]!['contents']).toEqual({
+      highlights: true,
+      text: { maxCharacters: 2000 },
+    });
+  });
+
+  it('lets the caller replace a default it names', async () => {
+    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+
+    await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      search: { contents: { highlights: { maxCharacters: 5000 } } },
+    });
+
+    expect(h.searchBodies[0]!['contents']).toEqual({ highlights: { maxCharacters: 5000 } });
   });
 
   it('reports embedding stats from the Voxell response', async () => {

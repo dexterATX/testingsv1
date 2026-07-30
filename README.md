@@ -80,6 +80,11 @@ Sections fill in as the run progresses:
 
 Fabricated citations are called out in red rather than quietly rendered.
 
+Two options widen a run beyond one search: *Also search for*, one query per
+line, and *Write the extra searches for me*, which generates three. Both feed
+the same fan-out and both are capped at eight extra searches between them, with
+what you typed taking priority — every one is another paid search.
+
 **Keys never reach the browser.** The page talks only to localhost; the server
 holds the credentials and sends back results. It binds to `127.0.0.1` for that
 reason — override with `HOST` only if you understand the exposure. Closing the
@@ -159,32 +164,47 @@ const report = await researchSearch(
 
 What it does, in order:
 
-1. **Search** — Exa, with `contents.text` when chunking, `highlights` otherwise
+1. **Search** — Exa, plus any `extraSearches`, merged
 2. **Drop exact duplicates** — by canonical URL, before spending an embedding
 3. **Chunk** *(optional)* — split each page into passages
 4. **Embed** — the query and every passage in a single batched request
 5. **Rerank** — by cosine similarity; with chunking, a result scores as its
    best-matching passage
 6. **Dedupe** — collapse results within `dedupeThreshold` of a higher-ranked one
-7. **Filter** — `minScore`, then `topK`
-8. **Cluster** *(optional)* — group survivors into themes
+7. **Cap per domain** — demote a publisher's fourth entry and beyond
+8. **Filter** — `minScore`
+9. **Hydrate** — fetch full text for the top `hydrateTopK`, chunk it, re-score
+   those by best passage
+10. **`topK`**
+11. **Cluster** *(optional)* — group survivors into themes
+
+The order is not arbitrary. Dedupe, the domain cap and `minScore` are cheap
+filters and hydration is the expensive step, so every filter sits upstream of
+it. More importantly, **dedupe and clustering only ever see first-pass
+vectors** — see *Hydration* below for why mixing the two passes would quietly
+break both.
 
 | Option | Default | Notes |
 |---|---|---|
 | `numResults` | 25 | Passed to Exa. Capped by your plan — 100 on the measured account |
 | `extraSearches` | `[]` | More searches, merged before ranking. The only way past the per-request cap |
-| `search` | `{}` | Any `SearchOptions`, merged over the defaults |
+| `search` | `{}` | Any `SearchOptions`, merged over the defaults — `contents` per key, not wholesale |
 | `model` | `ultra-4k` | `turbo` (free) / `pro` / `ultra-4k`; or set `VOXELL_MODEL` |
 | `chunk` | `false` | `true`, or `{ maxChars, overlapChars, minChars }` |
 | `dedupe` | `true` | |
 | `dedupeThreshold` | per model | Cosine at or above which two results are one story — see below |
+| `maxPerDomain` | 3 | Entries one host may hold before the rest are demoted. `0` disables |
+| `hydrate` | `true` | Re-score the top results on their full text |
+| `hydrateTopK` | 25 | How far down that second pass reaches. Must be ≥ `topK` |
+| `topChunks` | 4 | Passages kept per hydrated result, for the write-up |
 | `cluster` | `false` | `true`, or `{ threshold, maxClusters }` |
 | `minScore` | — | Drop results below this similarity to the query |
 | `topK` | — | Keep the best N after ranking and dedupe |
 
 Each result carries `score`, `originalRank`, `rankDelta` (positive = the rerank
-promoted it), absorbed `duplicates`, and — with chunking on — `bestChunk`, the
-passage that actually matched. `report.exa` keeps the raw response.
+promoted it), absorbed `duplicates`, and — where chunking or hydration ran —
+`bestChunk`, the passage that actually matched, plus `topChunks`, the best few
+in document order. `report.exa` keeps the raw response.
 
 Pass `onEvent` to observe stages as they finish rather than waiting for the
 whole run — this is what the web UI streams:
@@ -239,6 +259,53 @@ ten that the single search never saw, and left the top score unchanged.
 
 The web UI exposes this as *Also search for*, one query per line.
 
+#### Writing the paraphrases automatically
+
+`extraSearches` has always worked. What it lacked was anyone to type into it —
+nobody rephrases their own question four ways. `expandQuery` does it:
+
+```ts
+import { expandQuery, fireworksCompleter } from './src/index.js';
+
+const extras = await expandQuery(query, { completer: fireworksCompleter(), count: 3 });
+
+await researchSearch(exa, voxell, {
+  query,                                        // ranking still uses this
+  extraSearches: extras.map((q) => ({ query: q })),
+});
+```
+
+It takes a `Completer`, not an SDK client, so **`researchSearch` stays free of
+any LLM dependency** — callers without a write-up key can still search, and the
+prompt and validation are testable with a stub. Run it first, pass the result
+in as ordinary extra searches.
+
+Measured, three generated queries against the plain single search:
+
+| Question | Unique results | New in top 10 | Embedding tokens |
+|---|---|---|---|
+| RAG retrieval evaluation | 25 → 94 | **4**, including #1 | 114k → 146k (1.3×) |
+| AI app builders 2026 | 25 → 98 | **6**, including #2 | 83k → 118k (1.4×) |
+
+That is not extra recall going unread at the bottom of the list — on the second
+question expansion supplied more than half of what the user actually sees.
+
+**Validation matters more than the prompt.** A model that answers in prose must
+degrade to no expansion, never to a paid search for a sentence of commentary,
+so `parseExpansions` drops headings, restatements of the original, duplicates
+and anything too long to be a query. It also salvages: the same model on the
+same prompt returned three bare lines on one call and
+`1. **"…"** — for security guidelines` on the next, and rejecting the second
+would leave the feature working on a coin flip.
+
+`expandQuery` returns `[]` on any failure. Pass `onError` to find out why —
+otherwise a timeout and a badly-behaved model look identical, and both look
+like a feature that does nothing.
+
+In the web UI this is *Write the extra searches for me*, and the queries it
+generated appear in the progress list — a bad expansion is only visible if you
+can see what it searched for.
+
 Note that the deep search types go the other way: `deep` and `deep-lite`
 returned 14 and 16 results against `fast`/`instant`'s 100. They do agentic
 multi-step research, not broad retrieval.
@@ -257,6 +324,60 @@ strong paragraph can't make two different articles look like the same story.
 Verified live: given a page where a single paragraph is on-topic and the rest
 is Kubernetes upgrades and office moves, chunking finds that paragraph and
 scores the page higher than whole-document embedding does.
+
+### Hydration
+
+Chunking every result costs roughly ten times the embedding tokens, most of it
+spent on results nobody reads. Hydration buys the same precision where it
+matters: rank everything on the search engine's highlights, then fetch full
+text for the top `hydrateTopK` survivors, chunk *those*, and re-score them by
+best passage.
+
+Measured over four questions, 30 results each: **8–10 of the top ten changed
+position**, at 5.8–7.0× the embedding tokens. Longer documents get more chunks
+and so more chances to score, which would be a length bias — checked, and it
+isn't one: correlation between document length and passage score was **−0.07**
+over 75 results.
+
+Two constraints make it safe, and both are load-bearing:
+
+- **Hydration changes `score` only, never `identity`.** Highlights are excerpts
+  the search engine selected *against the query*; a full-text centroid points
+  at the document's own centre of mass. They are not the same distribution, and
+  `thresholds.ts` is calibrated on the first. Letting hydrated results carry
+  full-text identity would stop dedupe working for exactly the highest-ranked
+  results, and clustering — which runs on `identity` — would group *by whether
+  a result was hydrated* and present that as a theme. The same documents
+  composed two ways already differ by 0.089 cosine, measured.
+- **Re-ranking happens inside the K block only.** First- and second-pass scores
+  are not on one scale, and the bias has unknown sign: max-over-chunks inflates
+  the second pass mechanically, while highlights are already a near-best-case
+  excerpt. Block membership is decided by first-pass scores alone and every
+  member is hydrated, so no cross-scale comparison ever happens. The cost is a
+  hard discontinuity at the block edge — hence `topK > hydrateTopK` is rejected
+  rather than silently mixing the two.
+
+`score` keeps the first-pass number; the second-pass one is `passageScore`.
+`minScore` is applied before hydration, on the scale the caller chose it for.
+
+A failed fetch is not a dropped result — Exa reports per-URL failures in
+`statuses` rather than throwing, and anything it could not fetch keeps its
+first-pass score and follows the hydrated block.
+
+### Spreading the publishers
+
+`maxPerDomain` (default 3) demotes a host's fourth entry and beyond to the tail
+of the list, after near-duplicate dedupe. Near-duplicate dedupe compares
+*content*, and three different pages from one vendor are not textually
+near-duplicate — they are one voice, repeated, and the site that publishes most
+wins.
+
+Honest about what this is: **insurance, not a measured win.** Across eight
+variations of the comparison question that motivated it, the top ten already
+held ten distinct domains every time, so the cap never engaged. It costs
+relevance where one site really is the authority — an API's own documentation —
+which is why the default is permissive and `0` turns it off. `stats.demotedByDomain`
+reports when it fires.
 
 ### Tuning the thresholds
 

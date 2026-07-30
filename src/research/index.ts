@@ -33,6 +33,8 @@ export type { Chunk, ChunkOptions } from './chunk.js';
 
 export { DEFAULT_CLUSTER_THRESHOLD, clusterVectors } from './cluster.js';
 export { thresholdsFor, isCalibrated, UNMEASURED_THRESHOLDS } from './thresholds.js';
+export { expandQuery, parseExpansions } from './expand.js';
+export type { ExpandOptions } from './expand.js';
 export type { SimilarityThresholds } from './thresholds.js';
 export type { Cluster, ClusterOptions } from './cluster.js';
 

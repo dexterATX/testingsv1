@@ -22,9 +22,11 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
 import { ExaClient } from '../exa/client.js';
+import { SEARCH_TYPES, type SearchType } from '../exa/types.js';
 import { VoxellClient } from '../voxell/client.js';
 import { FileVectorStore } from '../store/file.js';
 import { researchSearch, type ResearchReport } from '../research/pipeline.js';
+import { expandQuery, normalizeQuery } from '../research/expand.js';
 import type { ResearchEvent } from '../research/events.js';
 import { synthesize, type Synthesis } from '../synthesis/synthesize.js';
 import { anthropicCompleter } from '../synthesis/anthropic.js';
@@ -53,6 +55,7 @@ interface RunRequest {
   /** An opaque id from `/api/config`, never a provider name. */
   writer?: unknown;
   extraQueries?: unknown;
+  expand?: unknown;
   searchType?: unknown;
 }
 
@@ -66,8 +69,9 @@ interface RunConfig {
   topK: number | undefined;
   synthesize: boolean;
   provider: Provider | undefined;
-  searchType: string | undefined;
+  searchType: SearchType | undefined;
   extraQueries: string[];
+  expand: boolean;
 }
 
 /** Writer id shown to the page, per provider. */
@@ -101,6 +105,14 @@ const MIME: Record<string, string> = {
 };
 
 const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * Extra searches per run, typed and generated together.
+ *
+ * Every one is another paid search whose results all have to be embedded, so
+ * this is a spend ceiling rather than a validation rule.
+ */
+const MAX_EXTRA_SEARCHES = 8;
 
 /**
  * Which synthesis providers this process actually has keys for.
@@ -157,7 +169,20 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
     .filter((entry): entry is string => typeof entry === 'string')
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '' && entry !== query)
-    .slice(0, 8);
+    .slice(0, MAX_EXTRA_SEARCHES);
+
+  /*
+   * Checked here, at the boundary, rather than cast through. An unknown value
+   * used to reach the search client and fail there, with a message about a
+   * request body — several layers from the dropdown that sent it.
+   */
+  let searchType: SearchType | undefined;
+  if (typeof raw.searchType === 'string' && raw.searchType !== '') {
+    if (!(SEARCH_TYPES as readonly string[]).includes(raw.searchType)) {
+      throw new Error(`Unknown search type. Expected one of: ${SEARCH_TYPES.join(', ')}.`);
+    }
+    searchType = raw.searchType as SearchType;
+  }
 
   return {
     query,
@@ -167,9 +192,33 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
     topK,
     synthesize: raw.synthesize === true,
     provider,
-    searchType: typeof raw.searchType === 'string' ? raw.searchType : undefined,
+    searchType,
     extraQueries,
+    expand: raw.expand === true,
   };
+}
+
+/**
+ * Merges the searches the user typed with the ones the model wrote.
+ *
+ * Typed queries come first and survive the cap: they are what the user
+ * actually asked for, and `expandQuery` only knows to avoid repeating the
+ * *original question* — it has never seen the *Also search for* box, so a
+ * generated line can collide with one typed there. Paying twice for the same
+ * hits is exactly what the cap exists to stop.
+ */
+export function mergeSearches(typed: string[], generated: string[]): string[] {
+  const seen = new Set(typed.map(normalizeQuery));
+  const merged = [...typed];
+
+  for (const query of generated) {
+    const key = normalizeQuery(query);
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(query);
+  }
+
+  return merged.slice(0, MAX_EXTRA_SEARCHES);
 }
 
 /**
@@ -305,16 +354,40 @@ async function handleRun(
         : { store: new FileVectorStore({ path: options.cachePath ?? '.cache/vectors.jsonl' }) },
     );
 
+    /*
+     * Expansion runs here rather than inside the pipeline, so that
+     * `researchSearch` keeps taking only a search client and an embeddings
+     * client. A caller without a write-up key can still search, and the
+     * offline suite stays hermetic.
+     */
+    let expanded: string[] = [];
+    if (config.expand && availableProviders().length > 0) {
+      expanded = await expandQuery(config.query, {
+        completer: pickCompleter(config.provider),
+        count: 3,
+        signal: controller.signal,
+        // Full detail to the terminal, where the operator is; the page gets an
+        // empty list, which is all it needs to say the run stayed narrow.
+        onError: (error) => console.error('[research] expansion skipped:', error),
+      });
+
+      // Sent even when empty. Otherwise a transient failure looks exactly like
+      // a checkbox that does nothing.
+      send({ type: 'expand:done', queries: expanded });
+    }
+
+    const allExtras = mergeSearches(config.extraQueries, expanded);
+
     const report = await researchSearch(exa, voxell, {
       query: config.query,
       numResults: config.numResults,
       chunk: config.chunk,
       cluster: config.cluster,
       ...(config.topK !== undefined ? { topK: config.topK } : {}),
-      ...(config.extraQueries.length > 0
-        ? { extraSearches: config.extraQueries.map((extra) => ({ query: extra })) }
+      ...(allExtras.length > 0
+        ? { extraSearches: allExtras.map((extra) => ({ query: extra })) }
         : {}),
-      ...(config.searchType ? { search: { type: config.searchType as never } } : {}),
+      ...(config.searchType ? { search: { type: config.searchType } } : {}),
       onEvent: (event: ResearchEvent) => send(publicEvent(event)),
       signal: controller.signal,
     });
@@ -374,6 +447,8 @@ export function serializeReport(report: ResearchReport): Record<string, unknown>
       chunks: stats.chunks,
       nearDuplicates: stats.nearDuplicates,
       demotedByDomain: stats.demotedByDomain,
+      hydrated: stats.hydrated,
+      hydrateFailed: stats.hydrateFailed,
       belowThreshold: stats.belowThreshold,
       dim: stats.dim,
       tokens: stats.tokens,

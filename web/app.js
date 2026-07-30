@@ -19,6 +19,7 @@ const el = {
   form: $('run-form'),
   query: $('query'),
   extraQueries: $('extraQueries'),
+  expand: $('expand'),
   numResults: $('numResults'),
   topK: $('topK'),
   searchType: $('searchType'),
@@ -305,6 +306,19 @@ let lastReport = null;
 
 function handle(event) {
   switch (event.type) {
+    // Show what it actually searched for, not just how many — a bad expansion
+    // is only visible if the extra queries are on screen.
+    case 'expand:done':
+      stage(
+        'expand',
+        'Widening the search',
+        event.queries.length > 0
+          ? event.queries.join(' · ')
+          : 'no extra searches — running your question as typed',
+        true,
+      );
+      break;
+
     case 'search:start':
       stage('search', 'Searching', `“${event.query}” · ${event.numResults} results`, false);
       break;
@@ -346,6 +360,20 @@ function handle(event) {
 
     case 'dedupe:near':
       stage('near', 'Near-duplicate dedupe', `${event.collapsed} collapsed`, true);
+      break;
+
+    case 'hydrate:start':
+      stage('hydrate', 'Reading the top pages', `${event.results} in full`, false);
+      break;
+
+    case 'hydrate:done':
+      stage(
+        'hydrate',
+        'Reading the top pages',
+        `${event.hydrated} read · ${event.passages} passages · ${event.moved} moved` +
+          (event.failed ? ` · ${event.failed} unavailable` : ''),
+        true,
+      );
       break;
 
     case 'cluster:done':
@@ -468,6 +496,7 @@ el.form.addEventListener('submit', (event) => {
     topK: Number.isFinite(topK) && topK > 0 ? topK : undefined,
     searchType: el.searchType.value || undefined,
     extraQueries: el.extraQueries.value.split('\n').map((line) => line.trim()).filter(Boolean),
+    expand: el.expand.checked,
     chunk: el.chunk.checked,
     cluster: el.cluster.checked,
     synthesize: el.synthesize.checked,
@@ -508,10 +537,14 @@ fetch('/api/config')
 
     const writers = config.writers ?? [];
     if (writers.length === 0) {
-      el.synthesize.checked = false;
-      el.synthesize.disabled = true;
-      el.synthesize.closest('.toggle').title =
-        'No write-up backend is configured. Add an API key to .env to enable this.';
+      // Expansion needs the same backend the write-up does — it is a model
+      // rephrasing the question, so it goes dark for the same reason.
+      for (const box of [el.synthesize, el.expand]) {
+        box.checked = false;
+        box.disabled = true;
+        box.closest('.toggle').title =
+          'No write-up backend is configured. Add an API key to .env to enable this.';
+      }
     } else if (writers.length > 1) {
       for (const writer of writers) {
         el.writer.append(new Option(writer.label, writer.id));
