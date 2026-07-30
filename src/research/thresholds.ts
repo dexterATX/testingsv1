@@ -13,7 +13,7 @@
  * supposed to operate in.
  */
 
-import type { EmbedModelName } from '../voxell/types.js';
+import { MODEL_DIMENSIONS, type EmbedModelName } from '../voxell/types.js';
 
 export interface SimilarityThresholds {
   /**
@@ -57,14 +57,17 @@ export interface SimilarityThresholds {
  *   results mostly are not duplicates. The non-duplicate ceiling is the
  *   well-sampled half, and it is the one that matters for over-collapsing.
  * - `cluster` is a weaker number than `dedupe`. See the note on it below.
+ *
+ * **Keyed by output dimension, not by alias.** The API accepts several names
+ * for the same model — `ultra`, `ultra-4k`, `forge-ultra-4k` and
+ * `text-embedding-3-large` all return the identical 4096-dimension vector from
+ * the same backing model. Keying on names means every alias nobody thought of
+ * falls through to the unmeasured fallback and dedupes on a guess, which is
+ * exactly what `ultra` was doing. A dimension cannot be spelled two ways.
  */
-const BY_MODEL: Record<string, SimilarityThresholds> = {
-  'ultra-4k': { dedupe: 0.94, cluster: 0.8 },
-  'forge-ultra-4k': { dedupe: 0.94, cluster: 0.8 },
-  'text-embedding-3-large': { dedupe: 0.94, cluster: 0.8 },
-
-  turbo: { dedupe: 0.95, cluster: 0.84 },
-  'forge-turbo': { dedupe: 0.95, cluster: 0.84 },
+const BY_DIMENSION: Record<number, SimilarityThresholds> = {
+  4096: { dedupe: 0.94, cluster: 0.8 },
+  1024: { dedupe: 0.95, cluster: 0.84 },
 };
 
 /**
@@ -80,11 +83,13 @@ export const UNMEASURED_THRESHOLDS: SimilarityThresholds = { dedupe: 0.95, clust
 
 /** Thresholds for `model`, falling back to conservative defaults. */
 export function thresholdsFor(model: EmbedModelName | undefined): SimilarityThresholds {
-  if (!model) return UNMEASURED_THRESHOLDS;
-  return BY_MODEL[model] ?? UNMEASURED_THRESHOLDS;
+  const dimension = model === undefined ? undefined : MODEL_DIMENSIONS[model];
+  if (dimension === undefined) return UNMEASURED_THRESHOLDS;
+  return BY_DIMENSION[dimension] ?? UNMEASURED_THRESHOLDS;
 }
 
 /** True when the model has measured thresholds rather than the fallback. */
 export function isCalibrated(model: EmbedModelName | undefined): boolean {
-  return Boolean(model && model in BY_MODEL);
+  const dimension = model === undefined ? undefined : MODEL_DIMENSIONS[model];
+  return dimension !== undefined && dimension in BY_DIMENSION;
 }

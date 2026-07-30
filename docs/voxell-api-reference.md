@@ -126,7 +126,13 @@ The validation error names only these three:
 400 {"error":"Invalid model specified. Allowed: turbo, pro, ultra-4k"}
 ```
 
-…but the ids from `GET /v1/models` are **also accepted**, mapped onto the same
+`ultra` is accepted too, undocumented and absent from that error, returning
+the identical 4096-dimension vector as `ultra-4k`. That matters more than a
+spelling: keying anything on the alias means `ultra` silently misses whatever
+was calibrated for `ultra-4k`, so `src/research/thresholds.ts` keys on output
+dimension instead.
+
+The ids from `GET /v1/models` are **also accepted**, mapped onto the same
 models. Note the OpenAI-named ones do *not* have OpenAI's dimensions:
 
 | Alias | Dimensions | OpenAI's actual dimensions |
@@ -160,6 +166,41 @@ reads like an oversized *document* when every document is individually fine.
 The 32,000-character limit is per *individual text*, not per request. It is the
 same for every model — `ultra-4k` refers to output dimensions, not a longer
 input window.
+
+### Matryoshka truncation — `/v1/embeddings` only
+
+The OpenAI-compatible endpoint honours a `dimensions` parameter, returning a
+shorter re-normalized vector:
+
+```json
+POST /v1/embeddings
+{ "input": ["..."], "model": "forge-ultra-4k", "dimensions": 1024 }
+```
+
+**`POST /v1/embed` silently ignores it.** `dimensions: 1024`, `512` and even a
+nonsensical `99` all come back at the full 4096 — the same silent-ignore
+behaviour Exa shows for unknown parameters, and the reason a claim that "a
+`dimensions` parameter" exists is only half true.
+
+Truncation is real Matryoshka rather than naive slicing. Measured over six
+graded queries of eight documents each:
+
+| Variant | Dimensions | nDCG | Separation |
+|---|---:|---:|---:|
+| `turbo`, native | 1024 | 0.9663 | 0.208 |
+| **`ultra-4k` → 1024** | 1024 | **0.9855** | **0.238** |
+| `ultra-4k` → 2048 | 2048 | 0.9797 | 0.228 |
+| `ultra-4k`, full | 4096 | 0.9913 | 0.234 |
+
+A truncated `ultra-4k` beats a native `turbo` of the *same size* on both
+measures, so 1024-dimension storage does not oblige you to accept turbo's
+quality. Full 4096 still ranks best. The 2048 row scoring below 1024 is
+non-monotonic and probably noise at this sample size — worth re-measuring
+before relying on it.
+
+This client uses `/v1/embed` and so cannot request truncation today. The
+trade it would buy is a quarter of the storage and of the cosine arithmetic
+for roughly half a point of nDCG.
 
 ### Vector properties
 

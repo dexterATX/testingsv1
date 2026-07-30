@@ -163,12 +163,20 @@ export class VoxellClient {
   private readonly store: VectorStore | undefined;
 
   constructor(options: VoxellClientOptions = {}) {
-    const apiKey = options.apiKey ?? process.env['VOXELL_API_KEY'];
+    // Voxell's own SDKs disagree on the variable name: the site documents
+    // VOXELL_API_KEY, the LlamaIndex and Vercel providers read FORGE_API_KEY,
+    // and the Answers docs use VOXELL_KEY. Accept all three rather than make
+    // somebody debug an empty-key error that is really a naming mismatch.
+    const apiKey =
+      options.apiKey ??
+      process.env['VOXELL_API_KEY'] ??
+      process.env['FORGE_API_KEY'] ??
+      process.env['VOXELL_KEY'];
 
     if (!apiKey) {
       throw new VoxellRequestValidationError(
-        'Missing Voxell API key. Set VOXELL_API_KEY in the environment (see .env.example) ' +
-          'or pass `new VoxellClient({ apiKey })`.',
+        'Missing Voxell API key. Set VOXELL_API_KEY (or FORGE_API_KEY / VOXELL_KEY) ' +
+          'in the environment (see .env.example), or pass `new VoxellClient({ apiKey })`.',
       );
     }
 

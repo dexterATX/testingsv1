@@ -44,6 +44,10 @@ export const DEFAULT_EMBED_MODEL: EmbedModel = 'ultra-4k';
  */
 export const MODEL_DIMENSIONS: Record<string, number> = {
   turbo: 1024,
+  // `ultra` is accepted alongside `ultra-4k` and returns the identical vector.
+  // It is absent from the API's own validation message, which names only
+  // turbo/pro/ultra-4k — measured, not documented.
+  ultra: 4096,
   pro: 2560,
   'ultra-4k': 4096,
   'forge-turbo': 1024,

@@ -71,3 +71,33 @@ describe('cluster reporting', () => {
     expect(reported([13, 2, 1, 1], 17), 'a blob plus a real pair').toEqual([13, 2]);
   });
 });
+
+describe('alias handling', () => {
+  it('gives every alias of one model the same thresholds', () => {
+    // The API accepts `ultra` as well as `ultra-4k`, and both return the
+    // identical 4096-dim vector. Keying thresholds on the name meant `ultra`
+    // silently fell through to the unmeasured fallback and deduped on a guess.
+    const ultraAliases = ['ultra', 'ultra-4k', 'forge-ultra-4k', 'text-embedding-3-large'];
+    for (const alias of ultraAliases) {
+      expect(isCalibrated(alias), alias).toBe(true);
+      expect(thresholdsFor(alias), alias).toEqual(thresholdsFor('ultra-4k'));
+    }
+
+    for (const alias of ['turbo', 'forge-turbo']) {
+      expect(thresholdsFor(alias), alias).toEqual(thresholdsFor('turbo'));
+    }
+  });
+
+  it('keys on dimension, so a model sharing a size shares its thresholds', () => {
+    // This is what makes the alias problem structurally impossible to
+    // reintroduce: a dimension cannot be spelled two ways.
+    for (const [name, dim] of Object.entries(MODEL_DIMENSIONS)) {
+      const sameSize = Object.entries(MODEL_DIMENSIONS)
+        .filter(([, d]) => d === dim)
+        .map(([n]) => n);
+      for (const other of sameSize) {
+        expect(thresholdsFor(name), `${name} vs ${other}`).toEqual(thresholdsFor(other));
+      }
+    }
+  });
+});
