@@ -165,6 +165,98 @@ describe('synthesize', () => {
     expect(calls[0]!.prompt).not.toContain('the whole long document');
   });
 
+  it('quotes every matched passage, in document order', async () => {
+    const { completer, calls } = stubCompleter('ok');
+    const report = makeReport([
+      makeResult({
+        bestChunk: { text: 'the third passage', index: 9, score: 0.9 },
+        // Hydration keeps the best N by score but hands them over in document
+        // order, and the prompt must preserve that: a write-up built from
+        // excerpts shuffled by score argues backwards.
+        topChunks: [
+          { text: 'the first passage', index: 1, score: 0.7 },
+          { text: 'the third passage', index: 9, score: 0.9 },
+        ],
+      }),
+    ]);
+
+    await synthesize(report, { completer });
+
+    const prompt = calls[0]!.prompt;
+    expect(prompt.indexOf('the first passage')).toBeLessThan(prompt.indexOf('the third passage'));
+  });
+
+  it('marks the jump between passages that are not adjacent', async () => {
+    const { completer, calls } = stubCompleter('ok');
+    const report = makeReport([
+      makeResult({
+        topChunks: [
+          { text: 'the opening claim', index: 0, score: 0.7 },
+          { text: 'a caveat from much later', index: 12, score: 0.9 },
+        ],
+      }),
+    ]);
+
+    await synthesize(report, { completer });
+
+    // Run together, two excerpts from opposite ends of a page read as one
+    // continuous statement the source never made.
+    expect(calls[0]!.prompt).toContain('the opening claim […] a caveat from much later');
+  });
+
+  it('does not quote the overlap between consecutive passages twice', async () => {
+    const { completer, calls } = stubCompleter('ok');
+    const shared = 'this sentence sits on the boundary between the two chunks';
+    const report = makeReport([
+      makeResult({
+        topChunks: [
+          { text: `an opening statement. ${shared}`, index: 4, score: 0.8 },
+          { text: `${shared} and then the rest of it.`, index: 5, score: 0.7 },
+        ],
+      }),
+    ]);
+
+    await synthesize(report, { completer });
+
+    const prompt = calls[0]!.prompt;
+    expect(prompt.split(shared)).toHaveLength(2);
+    expect(prompt).toContain('an opening statement.');
+    expect(prompt).toContain('and then the rest of it.');
+  });
+
+  it('stops on a whole passage rather than tailing off mid-sentence', async () => {
+    const { completer, calls } = stubCompleter('ok');
+    const report = makeReport([
+      makeResult({
+        topChunks: [
+          { text: 'a'.repeat(400), index: 0, score: 0.9 },
+          { text: 'b'.repeat(400), index: 5, score: 0.8 },
+        ],
+      }),
+    ]);
+
+    // Room for the first passage and only a stub of the second.
+    await synthesize(report, { completer, evidenceChars: 500 });
+
+    expect(calls[0]!.prompt).toContain('a'.repeat(400));
+    expect(calls[0]!.prompt).not.toContain('b');
+  });
+
+  it('falls back to the best chunk for a source the second pass never reached', async () => {
+    const { completer, calls } = stubCompleter('ok');
+    const report = makeReport([
+      makeResult({
+        embeddedText: 'the whole long document',
+        bestChunk: { text: 'the relevant passage', index: 3, score: 0.8 },
+        topChunks: [],
+      }),
+    ]);
+
+    await synthesize(report, { completer });
+
+    expect(calls[0]!.prompt).toContain('the relevant passage');
+  });
+
   it('caps evidence length', async () => {
     const { completer, calls } = stubCompleter('ok');
     const report = makeReport([makeResult({ embeddedText: 'x'.repeat(5000) })]);

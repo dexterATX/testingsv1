@@ -114,6 +114,9 @@ const MAX_BODY_BYTES = 64 * 1024;
  */
 const MAX_EXTRA_SEARCHES = 8;
 
+/** Sources offered to the write-up. */
+const MAX_SYNTHESIS_SOURCES = 20;
+
 /**
  * Which synthesis providers this process actually has keys for.
  *
@@ -400,7 +403,10 @@ async function handleRun(
 
       const synthesis = await synthesize(report, {
         completer,
-        maxSources: Math.min(report.results.length, 12),
+        // 12 was chosen when a source contributed one short excerpt. Sources
+        // now carry several matched passages each, so the binding constraint
+        // is the model's context rather than this number.
+        maxSources: Math.min(report.results.length, MAX_SYNTHESIS_SOURCES),
         signal: controller.signal,
       });
 

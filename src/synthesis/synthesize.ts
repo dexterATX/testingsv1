@@ -16,7 +16,13 @@ export interface SynthesizeOptions {
   completer: Completer;
   /** Cap on sources included. Defaults to every result in the report. */
   maxSources?: number;
-  /** Characters of evidence quoted per source. Defaults to 1200. */
+  /**
+   * Characters of evidence quoted per source. Defaults to 4200.
+   *
+   * A hydrated result carries several passages and each one is already
+   * ~1350 characters, so a budget sized for one passage does not select
+   * between them — it truncates the rest away.
+   */
   evidenceChars?: number;
   /** Extra instruction appended to the system prompt. */
   guidance?: string;
@@ -52,7 +58,21 @@ export interface Synthesis {
   usage: { inputTokens?: number; outputTokens?: number } | undefined;
 }
 
-const DEFAULT_EVIDENCE_CHARS = 1_200;
+const DEFAULT_EVIDENCE_CHARS = 4_200;
+
+/**
+ * Below this, a passage is too short to be worth the tokens it costs and the
+ * confusion a fragment causes; the budget stops rather than adding a stub.
+ */
+const MIN_PASSAGE_CHARS = 300;
+
+/** Shortest suffix/prefix match treated as real chunk overlap, not coincidence. */
+const MIN_OVERLAP_CHARS = 24;
+/** Chunking's overlap is 150 by default; allow headroom without scanning far. */
+const MAX_OVERLAP_CHARS = 400;
+
+/** Marks a jump between passages that are not adjacent in the source. */
+const GAP = ' […] ';
 
 const SYSTEM_PROMPT = `You are a research analyst. You will be given a question and a numbered list of sources, each with a title, URL, and an extract.
 
@@ -67,12 +87,80 @@ Rules:
 - Lead with the answer. Supporting detail comes after.
 - Write prose, not a bulleted list of source summaries. The reader wants the synthesis, not a catalogue.`;
 
+/**
+ * Trims the part of `next` that `previous` already said.
+ *
+ * Chunks are cut with a fixed overlap, so consecutive passages repeat their
+ * boundary verbatim. Quoting it twice wastes budget and reads as emphasis the
+ * source never gave. The overlap is measured rather than assumed, since the
+ * chunker's setting is a caller option and the text is normalised first.
+ */
+function dropOverlap(previous: string, next: string): string {
+  const limit = Math.min(MAX_OVERLAP_CHARS, previous.length, next.length);
+
+  for (let size = limit; size >= MIN_OVERLAP_CHARS; size -= 1) {
+    if (previous.endsWith(next.slice(0, size))) return next.slice(size).trimStart();
+  }
+
+  return next;
+}
+
+/**
+ * Builds the extract quoted for one source.
+ *
+ * Hydrated results carry several passages — the ones that actually matched the
+ * question, kept in document order so the write-up reads them as an argument
+ * rather than a scoreboard. Non-adjacent passages are separated by `[…]`: two
+ * excerpts from opposite ends of a page, joined seamlessly, would read as one
+ * continuous claim the source never made.
+ *
+ * Falls back to the single best chunk, then to the embedded text, for results
+ * the second pass never reached.
+ */
+function buildEvidence(entry: RankedResult, evidenceChars: number): string {
+  const passages = entry.topChunks ?? [];
+
+  if (passages.length === 0) {
+    return (entry.bestChunk?.text ?? entry.embeddedText)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, evidenceChars);
+  }
+
+  let evidence = '';
+  let previousIndex: number | undefined;
+
+  for (const passage of passages) {
+    const normalized = passage.text.replace(/\s+/g, ' ').trim();
+    if (normalized === '') continue;
+
+    const adjacent = previousIndex !== undefined && passage.index === previousIndex + 1;
+    // Against the whole accumulated extract, whose tail *is* the previous
+    // passage — and which is already normalised the same way.
+    const body = adjacent ? dropOverlap(evidence, normalized) : normalized;
+
+    if (body === '') {
+      previousIndex = passage.index;
+      continue;
+    }
+
+    const separator = evidence === '' ? '' : adjacent ? ' ' : GAP;
+    const remaining = evidenceChars - evidence.length - separator.length;
+
+    // Stop rather than tail off mid-passage: a fragment too short to carry a
+    // claim still costs tokens and invites a citation to nothing.
+    if (remaining < MIN_PASSAGE_CHARS) break;
+
+    evidence += separator + body.slice(0, remaining);
+    previousIndex = passage.index;
+  }
+
+  return evidence;
+}
+
 /** Renders one source block for the prompt. */
 function formatSource(entry: RankedResult, marker: number, evidenceChars: number): string {
-  const evidence = (entry.bestChunk?.text ?? entry.embeddedText)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, evidenceChars);
+  const evidence = buildEvidence(entry, evidenceChars);
 
   const lines = [
     `[${marker}] ${entry.result.title ?? '(untitled)'}`,

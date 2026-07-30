@@ -447,6 +447,24 @@ synthesis.uncitedMarkers;             // sources the write-up ignored
 exist; `invalidMarkers` catches exactly that. A non-empty array means the
 write-up should not be trusted as-is — the example exits non-zero on it.
 
+Each source is quoted from its `topChunks` — the passages that actually matched
+the question, not the first 1200 characters of the page. Three details make
+that worth doing rather than merely longer:
+
+- **Document order, not score order.** A write-up built from excerpts shuffled
+  by relevance argues backwards.
+- **`[…]` between non-adjacent passages.** Two excerpts from opposite ends of a
+  page, run together, read as one continuous claim the source never made.
+- **Consecutive passages are de-overlapped.** Chunks are cut with 150
+  characters of overlap; quoting the boundary twice wastes budget and reads as
+  emphasis the source never gave. The overlap is measured, not assumed.
+
+`evidenceChars` (default 4200) is a per-source budget, and it stops on a whole
+passage rather than tailing off mid-sentence — a fragment too short to carry a
+claim still costs tokens and invites a citation to nothing. At default chunk
+sizes that admits about three of the four passages `topChunks` retains; raise
+it if you would rather pay for the fourth.
+
 Synthesis takes a `Completer`, not an SDK client, so prompt construction and
 citation checking are testable without a key, and another model can be swapped
 in:
