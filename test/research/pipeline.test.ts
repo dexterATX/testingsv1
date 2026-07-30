@@ -361,6 +361,18 @@ describe('researchSearch with chunking', () => {
     expect(withoutChunks.searchBodies[0]!['contents']).toEqual({ highlights: true });
   });
 
+  it('honours pageChars, which is what makes a run cheap or slow', async () => {
+    // Page text scales embedding cost and latency almost linearly, so this
+    // number has to reach the request rather than sit in a constant.
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    await researchSearch(h.exa, h.voxell, { query: QUERY, chunk: true, pageChars: 3_000 });
+
+    expect(h.searchBodies[0]!['contents']).toMatchObject({
+      text: { maxCharacters: 3_000 },
+    });
+  });
+
   it('embeds more passages than results, and reports the count', async () => {
     const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
 

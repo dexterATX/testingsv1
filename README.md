@@ -215,6 +215,7 @@ break both.
 | `hydrate` | `true` | Re-score the top results on their full text |
 | `hydrateTopK` | 25 | How far down that second pass reaches. Must be ≥ `topK` |
 | `topChunks` | 4 | Passages kept per hydrated result, for the write-up |
+| `pageChars` | 12000 | Characters read per page. Scales cost and latency almost linearly — see below |
 | `cluster` | `false` | `true`, or `{ threshold, maxClusters }` |
 | `minScore` | — | Drop results below this similarity to the query |
 | `topK` | — | Keep the best N after ranking and dedupe |
@@ -381,6 +382,35 @@ Two constraints make it safe, and both are load-bearing:
 A failed fetch is not a dropped result — Exa reports per-URL failures in
 `statuses` rather than throwing, and anything it could not fetch keeps its
 first-pass score and follows the hydrated block.
+
+#### How much of a page to read
+
+Hydration is where a run spends its time — 99.8 s of a measured 139 s run,
+embedding 408 passages — and `pageChars` scales that almost linearly. So the
+question is how much page you can skip before you start losing the buried
+passages hydration exists to find.
+
+Measured over 30 top-ten results across three questions, the offset at which
+the **winning** passage was found:
+
+| p50 | p75 | p90 | p95 | p100 |
+|---:|---:|---:|---:|---:|
+| 0 | 2,100 | 8,400 | 10,500 | 23,100 |
+
+Half of all winners are in the very first chunk.
+
+| `pageChars` | winners kept | embedding cost |
+|---:|---|---|
+| 6,000 | 26/30 (87%) | ~25% |
+| 8,000 | 27/30 (90%) | ~33% |
+| **12,000** *(default)* | **29/30 (97%)** | **~50%** |
+| 24,000 | 30/30 | 100% |
+
+12,000 halves the expensive stage for one winner in thirty — and that result
+is not lost, it falls back to its best passage inside the cap, so the cost is a
+worse score for one result rather than a missing one. Deliberately not lower:
+at 8,000 a tenth of results score on the wrong passage, which is a different
+quality of trade. Raise it when recall on long documents beats latency.
 
 ### Spreading the publishers
 

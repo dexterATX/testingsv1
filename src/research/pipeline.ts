@@ -86,6 +86,16 @@ export interface ResearchOptions {
   /** Passages kept per hydrated result, for synthesis evidence. Defaults to 4. */
   topChunks?: number;
   /**
+   * Characters of each page read for chunking and hydration. Defaults to
+   * 12,000.
+   *
+   * This scales the run's embedding cost — and its latency — almost linearly.
+   * The default keeps 29 of 30 winning passages for half the cost of reading
+   * 24,000; see `DEFAULT_PAGE_CHARS`. Raise it when recall on long documents
+   * matters more than speed.
+   */
+  pageChars?: number;
+  /**
    * Most results one publisher may occupy before the rest are demoted below
    * other publishers. Defaults to 3; `0` disables the cap.
    *
@@ -205,8 +215,35 @@ const DEFAULT_HYDRATE_TOP_K = 25;
 const DEFAULT_TOP_CHUNKS = 4;
 /** `contents()` has no per-type default, and a block of URLs can livecrawl. */
 const HYDRATE_TIMEOUT_MS = 90_000;
-/** Chunking wants whole pages, so it asks Exa for more text per result. */
-const CHUNKED_EMBED_MAX_CHARS = 24_000;
+/**
+ * How much of each page chunking and hydration read.
+ *
+ * Chunking wants whole pages rather than excerpts, and this scales the run's
+ * embedding cost linearly — hydration alone was 72% of a measured 139-second
+ * run, embedding 408 passages.
+ *
+ * 12,000 rather than the 24,000 it started at. Measured over 30 top-ten
+ * results across three questions, the offset at which the *winning* passage
+ * was found:
+ *
+ * | percentile | offset |
+ * |---|---:|
+ * | p50 | 0 |
+ * | p75 | 2,100 |
+ * | p90 | 8,400 |
+ * | p95 | 10,500 |
+ * | p100 | 23,100 |
+ *
+ * Half of all winners are in the very first chunk. A 12,000 cap keeps 29 of
+ * 30 for half the embedding, and the one it loses does not vanish — that
+ * result falls back to its best passage inside the cap, so the cost is a worse
+ * score for one result in thirty rather than a lost result.
+ *
+ * Deliberately not lower: 8,000 keeps 27 of 30, and a tenth of results
+ * scoring on the wrong passage is a different quality of trade. Raise it with
+ * `pageChars` when recall on long documents matters more than latency.
+ */
+const DEFAULT_PAGE_CHARS = 12_000;
 
 function emptyReport(
   query: string,
@@ -266,6 +303,7 @@ async function hydrateBlock(
     model: EmbedModelName | undefined;
     chunkOptions: ChunkOptions;
     topChunks: number;
+    pageChars: number;
     signal?: AbortSignal;
   },
 ): Promise<{
@@ -276,7 +314,7 @@ async function hydrateBlock(
   moved: number;
   embed: EmbedTotals | undefined;
 }> {
-  const { block, queryVector, model, chunkOptions, topChunks } = options;
+  const { block, queryVector, model, chunkOptions, topChunks, pageChars } = options;
   const before = block.map((entry) => entry.ranked.result.url);
 
   let contents;
@@ -284,7 +322,7 @@ async function hydrateBlock(
     contents = await exa.contents(
       block.map((entry) => entry.ranked.result.url),
       {
-        text: { maxCharacters: CHUNKED_EMBED_MAX_CHARS },
+        text: { maxCharacters: pageChars },
         // `contents()` has no per-type default the way `search()` does, and a
         // block of 25 URLs can livecrawl for a while.
         timeoutMs: HYDRATE_TIMEOUT_MS,
@@ -316,7 +354,7 @@ async function hydrateBlock(
 
     const composed = resultToEmbedText(
       { ...entry.ranked.result, text },
-      { prefer: 'text', maxChars: CHUNKED_EMBED_MAX_CHARS },
+      { prefer: 'text', maxChars: pageChars },
     );
 
     chunkText(composed, chunkOptions).forEach((part, partIndex) => {
@@ -429,6 +467,7 @@ export async function researchSearch(
     hydrate = true,
     hydrateTopK = DEFAULT_HYDRATE_TOP_K,
     topChunks = DEFAULT_TOP_CHUNKS,
+    pageChars = DEFAULT_PAGE_CHARS,
     cluster = false,
     minScore,
     topK,
@@ -454,7 +493,7 @@ export async function researchSearch(
 
   // Chunking needs whole pages to be worth doing; highlights are already short.
   const defaultContents = chunking
-    ? { text: { maxCharacters: CHUNKED_EMBED_MAX_CHARS }, highlights: true }
+    ? { text: { maxCharacters: pageChars }, highlights: true }
     : { highlights: true };
 
   emit({ type: 'search:start', query, numResults });
@@ -538,7 +577,7 @@ export async function researchSearch(
   }
 
   const textOptions: EmbedTextOptions = chunking
-    ? { prefer: 'text', maxChars: CHUNKED_EMBED_MAX_CHARS, ...embedText }
+    ? { prefer: 'text', maxChars: pageChars, ...embedText }
     : { ...embedText };
 
   const documents = unique.map((result) => resultToEmbedText(result, textOptions));
@@ -789,6 +828,7 @@ export async function researchSearch(
       model,
       chunkOptions,
       topChunks,
+      pageChars,
       ...(signal ? { signal } : {}),
     });
 
