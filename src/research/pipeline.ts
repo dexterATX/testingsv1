@@ -68,6 +68,24 @@ export interface ResearchOptions {
    */
   dedupeThreshold?: number;
   /**
+   * Fetch full page text for the top results and re-score them by their best
+   * matching passage. Defaults to true.
+   *
+   * The first pass ranks on title plus the excerpt the search engine chose,
+   * which averages away a single relevant paragraph in an otherwise unrelated
+   * page. This second pass fixes that where it is read, without paying for it
+   * on results nobody sees.
+   */
+  hydrate?: boolean;
+  /**
+   * How many results the second pass covers. Defaults to 25, and must be at
+   * least `topK` — results outside the block are ranked on the first-pass
+   * scale and cannot be interleaved with those inside it.
+   */
+  hydrateTopK?: number;
+  /** Passages kept per hydrated result, for synthesis evidence. Defaults to 4. */
+  topChunks?: number;
+  /**
    * Most results one publisher may occupy before the rest are demoted below
    * other publishers. Defaults to 3; `0` disables the cap.
    *
@@ -116,6 +134,17 @@ export interface RankedResult {
   bestChunk?: BestChunk;
   /** With chunking on: how many passages this result was split into. */
   chunkCount?: number;
+  /**
+   * Best-passage similarity from the second pass, when this result was
+   * hydrated. **Not comparable with `score`**, which stays on the first-pass
+   * scale so `minScore` keeps meaning what the caller chose.
+   */
+  passageScore?: number;
+  /**
+   * The most relevant passages, in document order — evidence for the write-up.
+   * Present only on hydrated results.
+   */
+  topChunks?: BestChunk[];
 }
 
 export interface ResearchCluster {
@@ -147,6 +176,10 @@ export interface ResearchReport {
     nearDuplicates: number;
     /** Results pushed below other publishers by the per-domain cap. */
     demotedByDomain: number;
+    /** Results whose full text was fetched and re-scored by best passage. */
+    hydrated: number;
+    /** Results in the second-pass block whose text could not be fetched. */
+    hydrateFailed: number;
     /** Dropped by `minScore`. */
     belowThreshold: number;
     dim: number;
@@ -166,6 +199,12 @@ const DEFAULT_NUM_RESULTS = 25;
  * its place, low enough that a vendor cannot supply a third of a comparison.
  */
 const DEFAULT_MAX_PER_DOMAIN = 3;
+/** Generous relative to a typical `topK`, so the block edge sits below what is read. */
+const DEFAULT_HYDRATE_TOP_K = 25;
+/** Passages kept per hydrated result for the write-up's evidence. */
+const DEFAULT_TOP_CHUNKS = 4;
+/** `contents()` has no per-type default, and a block of URLs can livecrawl. */
+const HYDRATE_TIMEOUT_MS = 90_000;
 /** Chunking wants whole pages, so it asks Exa for more text per result. */
 const CHUNKED_EMBED_MAX_CHARS = 24_000;
 
@@ -185,6 +224,8 @@ function emptyReport(
       chunks: 0,
       nearDuplicates: 0,
       demotedByDomain: 0,
+      hydrated: 0,
+      hydrateFailed: 0,
       belowThreshold: 0,
       dim: 0,
       model: '',
@@ -193,6 +234,166 @@ function emptyReport(
       cacheHits: 0,
     },
     exa: searchResponse,
+  };
+}
+
+/** Embedding usage from one `embed()` call, so two passes can be summed. */
+interface EmbedTotals {
+  embedded: number;
+  tokens: number;
+  latencyMs: number;
+  cacheHits: number;
+}
+
+interface Survivor {
+  ranked: RankedResult;
+  identity: number[];
+}
+
+/**
+ * Fetches full text for a block of already-ranked results and re-scores them
+ * by their best-matching passage.
+ *
+ * Returns the block reordered. Callers must not merge this ordering with
+ * results outside the block — see the note at the call site.
+ */
+async function hydrateBlock(
+  exa: ExaClient,
+  voxell: VoxellClient,
+  options: {
+    block: Survivor[];
+    queryVector: number[];
+    model: EmbedModelName | undefined;
+    chunkOptions: ChunkOptions;
+    topChunks: number;
+    signal?: AbortSignal;
+  },
+): Promise<{
+  block: Survivor[];
+  hydrated: number;
+  failed: number;
+  passages: number;
+  moved: number;
+  embed: EmbedTotals | undefined;
+}> {
+  const { block, queryVector, model, chunkOptions, topChunks } = options;
+  const before = block.map((entry) => entry.ranked.result.url);
+
+  let contents;
+  try {
+    contents = await exa.contents(
+      block.map((entry) => entry.ranked.result.url),
+      {
+        text: { maxCharacters: CHUNKED_EMBED_MAX_CHARS },
+        // `contents()` has no per-type default the way `search()` does, and a
+        // block of 25 URLs can livecrawl for a while.
+        timeoutMs: HYDRATE_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+  } catch {
+    // A failed fetch must not lose the run. Every result keeps the score and
+    // the position the first pass gave it.
+    return { block, hydrated: 0, failed: block.length, passages: 0, moved: 0, embed: undefined };
+  }
+
+  // `/contents` reports per-URL failures in `statuses` rather than throwing, so
+  // an empty text field is a normal outcome, not an exception.
+  const textByUrl = new Map<string, string>();
+  for (const result of contents.results) {
+    if (result.text && result.text.trim() !== '') {
+      textByUrl.set(canonicalizeUrl(result.url), result.text);
+    }
+  }
+
+  const passages: string[] = [];
+  const ownerOfPassage: number[] = [];
+  const indexInDoc: number[] = [];
+
+  block.forEach((entry, docIndex) => {
+    const text = textByUrl.get(canonicalizeUrl(entry.ranked.result.url));
+    if (!text) return;
+
+    const composed = resultToEmbedText(
+      { ...entry.ranked.result, text },
+      { prefer: 'text', maxChars: CHUNKED_EMBED_MAX_CHARS },
+    );
+
+    chunkText(composed, chunkOptions).forEach((part, partIndex) => {
+      passages.push(part.text);
+      ownerOfPassage.push(docIndex);
+      indexInDoc.push(partIndex);
+    });
+  });
+
+  if (passages.length === 0) {
+    return { block, hydrated: 0, failed: block.length, passages: 0, moved: 0, embed: undefined };
+  }
+
+  const embedResult = await voxell.embed(passages, {
+    ...(model ? { model } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+
+  const perDoc = block.map(() => [] as Array<{ text: string; index: number; score: number }>);
+  embedResult.embeddings.forEach((vector, i) => {
+    const owner = ownerOfPassage[i] as number;
+    (perDoc[owner] as (typeof perDoc)[number]).push({
+      text: passages[i] as string,
+      index: indexInDoc[i] as number,
+      score: cosineSimilarity(queryVector, vector),
+    });
+  });
+
+  let hydrated = 0;
+  const scored: Survivor[] = [];
+  const untouched: Survivor[] = [];
+
+  block.forEach((entry, docIndex) => {
+    const chunks = perDoc[docIndex] as (typeof perDoc)[number];
+    if (chunks.length === 0) {
+      untouched.push(entry);
+      return;
+    }
+
+    const byScore = [...chunks].sort((a, b) => b.score - a.score);
+    const best = byScore[0] as (typeof byScore)[number];
+
+    entry.ranked.passageScore = best.score;
+    entry.ranked.chunkCount = chunks.length;
+    entry.ranked.bestChunk = { text: best.text, index: best.index, score: best.score };
+    // Best N by relevance, but emitted in document order: the write-up reads
+    // them as a passage of prose, and score order scrambles the argument.
+    entry.ranked.topChunks = byScore.slice(0, topChunks).sort((a, b) => a.index - b.index);
+
+    hydrated += 1;
+    scored.push(entry);
+  });
+
+  // Hydrated results order among themselves by passage score. Results whose
+  // text could not be fetched have no second-pass evidence to be ranked with,
+  // so they keep first-pass order and follow — a real cost of a failed fetch,
+  // and the alternative is comparing two scales.
+  scored.sort((a, b) => (b.ranked.passageScore ?? 0) - (a.ranked.passageScore ?? 0));
+  const reordered = [...scored, ...untouched];
+
+  const moved = reordered.reduce(
+    (count, entry, index) => count + (entry.ranked.result.url === before[index] ? 0 : 1),
+    0,
+  );
+
+  return {
+    block: reordered,
+    hydrated,
+    failed: block.length - hydrated,
+    passages: passages.length,
+    moved,
+    embed: {
+      embedded: passages.length,
+      tokens: embedResult.tokens,
+      latencyMs: embedResult.latencyMs,
+      cacheHits: embedResult.cacheHits,
+    },
   };
 }
 
@@ -225,6 +426,9 @@ export async function researchSearch(
     dedupe = true,
     dedupeThreshold,
     maxPerDomain = DEFAULT_MAX_PER_DOMAIN,
+    hydrate = true,
+    hydrateTopK = DEFAULT_HYDRATE_TOP_K,
+    topChunks = DEFAULT_TOP_CHUNKS,
     cluster = false,
     minScore,
     topK,
@@ -524,6 +728,86 @@ export async function researchSearch(
   }
   const belowThreshold = beforeThreshold - survivors.length;
 
+  /*
+   * Second pass: fetch full page text for the results worth looking at closely,
+   * chunk it, and re-score them by their best-matching passage.
+   *
+   * Highlights are an excerpt someone else chose. A page whose one relevant
+   * paragraph sits among ten irrelevant ones scores as the average of the
+   * excerpt, which is why chunking beats whole-document embedding on exactly
+   * that shape (`test/live/pipeline.live.test.ts`). Doing it for every result
+   * would multiply embedding volume roughly tenfold for results nobody reads,
+   * so it happens here — after every cheap filter, for the top slice only.
+   *
+   * Two rules make this safe, and both are load-bearing:
+   *
+   * 1. **`identity` is never touched.** Dedupe and clustering compare identity
+   *    vectors against thresholds calibrated on first-pass text. A full-text
+   *    centroid points at a document's own centre of mass, a highlight vector
+   *    points at the query; mixing the two populations in one threshold
+   *    comparison is a category error, and clustering would group *by whether
+   *    a result was hydrated* rather than by topic. Hence dedupe, the domain
+   *    cap and `minScore` all run above this, on one homogeneous population.
+   *
+   * 2. **Re-ranking stays inside the block.** A best-of-many-passages score is
+   *    not comparable with a single highlight score — max-over-chunks inflates
+   *    with document length, while highlights are already a near-best-case
+   *    excerpt — so promoting an unhydrated result past a hydrated one would
+   *    compare two different scales. Membership of the block is decided by
+   *    first-pass scores alone; ordering within it by passage scores. The cost
+   *    is a discontinuity at the block edge, which is why K must exceed `topK`.
+   */
+  let hydrated = 0;
+  let hydrateFailed = 0;
+  let hydratePassages = 0;
+  let hydrateMoved = 0;
+  let hydrateEmbed: EmbedTotals | undefined;
+
+  const hydrateCount = hydrate === false ? 0 : Math.min(hydrateTopK, survivors.length);
+
+  if (hydrateCount > 0) {
+    if (topK !== undefined && topK > hydrateCount && hydrate !== false) {
+      throw new Error(
+        `topK (${topK}) exceeds the hydrated block (${hydrateCount}), so results below the ` +
+          `block would be ranked on a different scale than those inside it. Raise ` +
+          `\`hydrateTopK\`, lower \`topK\`, or pass \`hydrate: false\`.`,
+      );
+    }
+
+    const block = survivors.slice(0, hydrateCount);
+    emit({ type: 'hydrate:start', results: block.length });
+
+    const outcome = await hydrateBlock(exa, voxell, {
+      block,
+      queryVector,
+      model,
+      chunkOptions,
+      topChunks,
+      ...(signal ? { signal } : {}),
+    });
+
+    hydrated = outcome.hydrated;
+    hydrateFailed = outcome.failed;
+    hydratePassages = outcome.passages;
+    hydrateMoved = outcome.moved;
+    hydrateEmbed = outcome.embed;
+
+    survivors = [...outcome.block, ...survivors.slice(hydrateCount)];
+
+    // Positions changed, so the arrows must describe the order returned.
+    survivors.forEach((entry, index) => {
+      entry.ranked.rankDelta = entry.ranked.originalRank - index;
+    });
+
+    emit({
+      type: 'hydrate:done',
+      hydrated,
+      failed: hydrateFailed,
+      passages: hydratePassages,
+      moved: hydrateMoved,
+    });
+  }
+
   if (topK !== undefined) survivors = survivors.slice(0, topK);
 
   const results = survivors.map((entry) => entry.ranked);
@@ -592,16 +876,21 @@ export async function researchSearch(
     stats: {
       retrieved,
       exactDuplicates,
-      embedded: passages.length + 1,
-      chunks: passages.length,
+      // Both passes, summed. Reading these off the first `embedResult` alone
+      // compiles perfectly and reports about half the truth — and the half it
+      // omits is the expensive half.
+      embedded: passages.length + 1 + (hydrateEmbed?.embedded ?? 0),
+      chunks: passages.length + (hydrateEmbed?.embedded ?? 0),
       nearDuplicates,
       demotedByDomain,
+      hydrated,
+      hydrateFailed,
       belowThreshold,
       dim: embedResult.dim,
       model: embedResult.model,
-      tokens: embedResult.tokens,
-      embedLatencyMs: embedResult.latencyMs,
-      cacheHits: embedResult.cacheHits,
+      tokens: embedResult.tokens + (hydrateEmbed?.tokens ?? 0),
+      embedLatencyMs: embedResult.latencyMs + (hydrateEmbed?.latencyMs ?? 0),
+      cacheHits: embedResult.cacheHits + (hydrateEmbed?.cacheHits ?? 0),
     },
     exa: searchResponse,
   };

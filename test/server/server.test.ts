@@ -281,7 +281,7 @@ describe('serializeReport stats', () => {
     // demotedByDomain shipped as `undefined` to the browser without one.
     const stats: ResearchReport['stats'] = {
       retrieved: 10, exactDuplicates: 1, embedded: 9, chunks: 9,
-      nearDuplicates: 2, demotedByDomain: 3, belowThreshold: 0,
+      nearDuplicates: 2, demotedByDomain: 3, hydrated: 0, hydrateFailed: 0, belowThreshold: 0,
       dim: 4096, model: 'qwen3-native-36l', tokens: 100, embedLatencyMs: 5, cacheHits: 0,
     };
 

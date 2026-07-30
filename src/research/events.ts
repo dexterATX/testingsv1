@@ -50,6 +50,18 @@ export type ResearchEvent =
     }
   | { type: 'rerank:done'; ranked: RankedPreview[] }
   | { type: 'dedupe:near'; collapsed: number; kept: number }
+  /** Fetching full page text for the survivors worth re-scoring closely. */
+  | { type: 'hydrate:start'; results: number }
+  | {
+      type: 'hydrate:done';
+      /** URLs whose full text came back and was re-scored. */
+      hydrated: number;
+      /** URLs Exa could not fetch; these keep their first-pass score. */
+      failed: number;
+      passages: number;
+      /** How many of the re-scored results changed position. */
+      moved: number;
+    }
   | { type: 'cluster:done'; clusters: ClusterPreview[] }
   | { type: 'done'; results: number };
 

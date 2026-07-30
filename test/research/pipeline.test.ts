@@ -55,15 +55,23 @@ interface Harness {
   exa: ExaClient;
   voxell: VoxellClient;
   searchBodies: Array<Record<string, unknown>>;
+  /** `/contents` calls, kept apart from `/search` — hydration uses both. */
+  contentsBodies: Array<Record<string, unknown>>;
   embedBodies: Array<{ texts: string[]; model?: string }>;
 }
 
 function harness(results: ExaResult[]): Harness {
   const searchBodies: Array<Record<string, unknown>> = [];
+  const contentsBodies: Array<Record<string, unknown>> = [];
   const embedBodies: Array<{ texts: string[]; model?: string }> = [];
 
-  const exaFetch = async (_input: unknown, init?: RequestInit): Promise<Response> => {
-    searchBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+  const exaFetch = async (input: unknown, init?: RequestInit): Promise<Response> => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    // Hydration calls `/contents` through the same client, so recording every
+    // request as a search would make the fan-out assertions count it twice.
+    if (String(input).includes('/contents')) contentsBodies.push(body);
+    else searchBodies.push(body);
+
     return new Response(
       JSON.stringify({ requestId: 'req_test', searchType: 'auto', results }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -92,6 +100,7 @@ function harness(results: ExaResult[]): Harness {
       fetch: voxellFetch as unknown as typeof globalThis.fetch,
     }),
     searchBodies,
+    contentsBodies,
     embedBodies,
   };
 }
@@ -356,14 +365,34 @@ describe('researchSearch with chunking', () => {
     expect(new Set(h.embedBodies[0]!.texts).size).toBe(h.embedBodies[0]!.texts.length);
   });
 
-  it('leaves bestChunk unset and one vector per result when chunking is off', async () => {
+  it('leaves bestChunk unset only when both passes are off', async () => {
+    // `chunk: false` alone no longer implies one vector per result: hydration
+    // is itself a second-pass chunking, so it populates bestChunk for the
+    // results it re-scores. Both have to be off to get a single vector.
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      hydrate: false,
+    });
+
+    expect(report.results[0]!.bestChunk).toBeUndefined();
+    expect(report.results[0]!.chunkCount).toBeUndefined();
+    expect(report.results[0]!.passageScore).toBeUndefined();
+    expect(report.stats.chunks).toBe(1);
+    expect(report.stats.hydrated).toBe(0);
+  });
+
+  it('hydration fills bestChunk even with chunking off', async () => {
     const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
 
     const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
 
-    expect(report.results[0]!.bestChunk).toBeUndefined();
-    expect(report.results[0]!.chunkCount).toBeUndefined();
-    expect(report.stats.chunks).toBe(1);
+    expect(report.stats.hydrated).toBe(1);
+    expect(report.results[0]!.bestChunk).toBeDefined();
+    expect(report.results[0]!.passageScore).toBeDefined();
+    // The winning passage is the one that mentions the marker, not the filler.
+    expect(report.results[0]!.bestChunk!.text).toContain('ALPHA');
   });
 
   it('never sends a blank passage, which the embeddings API 502s on', async () => {
@@ -705,5 +734,113 @@ describe('researchSearch per-domain cap', () => {
     report.results.forEach((entry, index) => {
       expect(entry.rankDelta).toBe(entry.originalRank - index);
     });
+  });
+});
+
+describe('researchSearch hydration', () => {
+  it('never lets hydration touch identity vectors', async () => {
+    // The load-bearing rule. Dedupe and clustering compare identity vectors
+    // against thresholds calibrated on first-pass text; a hydrated result
+    // carrying a full-text centroid would be compared against unhydrated
+    // results carrying highlight vectors, and clustering would group by
+    // whether a result was hydrated rather than by topic.
+    const results = [
+      makeLongResult('ALPHA', 'https://a.example/long'),
+      makeResult('BETA', 'https://b.example/beta'),
+      makeResult('GAMMA', 'https://c.example/gamma'),
+    ];
+
+    const withHydration = await researchSearch(harness(results).exa, harness(results).voxell, {
+      query: QUERY,
+      dedupe: true,
+    });
+    const withoutHydration = await researchSearch(harness(results).exa, harness(results).voxell, {
+      query: QUERY,
+      dedupe: true,
+      hydrate: false,
+    });
+
+    // Same dedupe outcome either way — proof identity was untouched.
+    expect(withHydration.stats.nearDuplicates).toBe(withoutHydration.stats.nearDuplicates);
+    expect(withHydration.results.map((r) => r.result.url).sort()).toEqual(
+      withoutHydration.results.map((r) => r.result.url).sort(),
+    );
+  });
+
+  it('keeps score on the first-pass scale and exposes passageScore separately', async () => {
+    // `minScore` filters on `score`, and the caller's number was chosen
+    // against the first-pass scale — overwriting it silently changes what
+    // every existing minScore means.
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
+    const entry = report.results[0]!;
+
+    expect(entry.passageScore).toBeDefined();
+    expect(entry.score).not.toBe(entry.passageScore);
+  });
+
+  it('refuses a topK larger than the hydrated block', async () => {
+    // Results outside the block are ranked on the other scale, so slicing
+    // past the block edge would interleave two incomparable orderings.
+    const h = harness([makeResult('ALPHA', 'https://example.com/a')]);
+
+    await expect(
+      researchSearch(h.exa, h.voxell, { query: QUERY, topK: 20, hydrateTopK: 5 }),
+    ).rejects.toThrow(/exceeds the hydrated block/);
+  });
+
+  it('keeps first-pass scores when the fetch fails entirely', async () => {
+    // A dead upstream must cost the second pass, not the run.
+    const results = [
+      makeLongResult('ALPHA', 'https://example.com/long'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ];
+
+    const baseline = await researchSearch(harness(results).exa, harness(results).voxell, {
+      query: QUERY,
+      hydrate: false,
+    });
+
+    const h = harness(results);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.exa as any).contents = async () => {
+      throw new Error('upstream exploded');
+    };
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
+
+    expect(report.stats.hydrated).toBe(0);
+    expect(report.stats.hydrateFailed).toBe(results.length);
+
+    // Identical to never having tried: same order, same scores.
+    expect(report.results.map((r) => r.result.url)).toEqual(
+      baseline.results.map((r) => r.result.url),
+    );
+    report.results.forEach((entry, index) => {
+      expect(entry.score).toBeCloseTo(baseline.results[index]!.score, 6);
+    });
+  });
+
+  it('emits topChunks in document order, not score order', async () => {
+    // The write-up reads them as prose; score order scrambles the argument.
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY, topChunks: 4 });
+    const chunks = report.results[0]!.topChunks!;
+
+    expect(chunks.length).toBeGreaterThan(1);
+    const indexes = chunks.map((c) => c.index);
+    expect(indexes).toEqual([...indexes].sort((a, b) => a - b));
+  });
+
+  it('sums embedding stats across both passes', async () => {
+    // Reading them off the first embedResult compiles and reports half.
+    const h = harness([makeLongResult('ALPHA', 'https://example.com/long')]);
+
+    const report = await researchSearch(h.exa, h.voxell, { query: QUERY });
+
+    expect(h.embedBodies.length).toBe(2);
+    const sent = h.embedBodies.reduce((n, b) => n + b.texts.length, 0);
+    expect(report.stats.embedded).toBe(sent);
   });
 });
