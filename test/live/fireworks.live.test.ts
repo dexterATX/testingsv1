@@ -161,6 +161,7 @@ function report(): ResearchReport {
       embedded: 3,
       chunks: 2,
       nearDuplicates: 0,
+      demotedByDomain: 0,
       belowThreshold: 0,
       dim: 1024,
       model: 'qwen3-native-28l',

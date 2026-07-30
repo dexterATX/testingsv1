@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canonicalizeUrl, resultToEmbedText } from '../../src/research/text.js';
+import { canonicalizeUrl, hostOf, resultToEmbedText } from '../../src/research/text.js';
 import type { ExaResult } from '../../src/exa/types.js';
 
 function result(overrides: Partial<ExaResult> = {}): ExaResult {
@@ -84,5 +84,33 @@ describe('canonicalizeUrl', () => {
 
   it('falls back gracefully on an unparseable URL', () => {
     expect(canonicalizeUrl('not a url')).toBe('not a url');
+  });
+});
+
+describe('hostOf', () => {
+  it('folds subdomains into one publisher', () => {
+    // A vendor posting from three of its own hosts is one voice, so capping
+    // per-origin would let it take three slots anyway.
+    expect(hostOf('https://vulk.dev/')).toBe('vulk.dev');
+    expect(hostOf('https://www.vulk.dev/category/x')).toBe('vulk.dev');
+    expect(hostOf('https://blog.vulk.dev/post')).toBe('vulk.dev');
+  });
+
+  it('keeps compound public suffixes apart', () => {
+    // Naive last-two-labels would make every .co.uk site one publisher.
+    expect(hostOf('https://www.bbc.co.uk/news')).toBe('bbc.co.uk');
+    expect(hostOf('https://itv.co.uk')).toBe('itv.co.uk');
+    expect(hostOf('https://bbc.co.uk')).not.toBe(hostOf('https://itv.co.uk'));
+  });
+
+  it('ignores port and case', () => {
+    expect(hostOf('https://Example.COM:8443/a')).toBe('example.com');
+  });
+
+  it('gives an unparseable string its own identity', () => {
+    // Never collapse unparseable entries together — that would cap unrelated
+    // results as though they shared a publisher.
+    expect(hostOf('not a url')).toBe('not a url');
+    expect(hostOf('also not a url')).not.toBe(hostOf('not a url'));
   });
 });

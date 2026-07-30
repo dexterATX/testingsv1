@@ -605,3 +605,105 @@ describe('researchSearch with extraSearches', () => {
     expect(Math.max(...started) - Math.min(...started)).toBeLessThan(50);
   });
 });
+
+describe('researchSearch per-domain cap', () => {
+  const fromHost = (marker: string, host: string, path: string): ExaResult =>
+    makeResult(marker, `https://${host}${path}`);
+
+  it('demotes a publisher past its quota below other publishers', async () => {
+    // ALPHA (score 1.0) beats GAMMA (0.5). Four ALPHA-scoring pages from one
+    // host would otherwise take the whole top of the list.
+    const h = harness([
+      fromHost('ALPHA', 'loud.example', '/a'),
+      fromHost('ALPHA', 'loud.example', '/b'),
+      fromHost('ALPHA', 'loud.example', '/c'),
+      fromHost('ALPHA', 'loud.example', '/d'),
+      fromHost('GAMMA', 'quiet.example', '/one'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      maxPerDomain: 3,
+    });
+
+    const hosts = report.results.map((r) => new URL(r.result.url).host);
+    expect(hosts.slice(0, 3)).toEqual(['loud.example', 'loud.example', 'loud.example']);
+    // The lower-scoring page from a fresh publisher now outranks the fourth.
+    expect(hosts[3]).toBe('quiet.example');
+    expect(hosts[4]).toBe('loud.example');
+    expect(report.stats.demotedByDomain).toBe(1);
+  });
+
+  it('demotes rather than drops, so a generous topK still returns them', async () => {
+    const h = harness([
+      fromHost('ALPHA', 'loud.example', '/a'),
+      fromHost('ALPHA', 'loud.example', '/b'),
+      fromHost('GAMMA', 'quiet.example', '/one'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      maxPerDomain: 1,
+    });
+
+    expect(report.results).toHaveLength(3);
+    expect(report.stats.demotedByDomain).toBe(1);
+  });
+
+  it('treats subdomains of one publisher as that publisher', async () => {
+    const h = harness([
+      fromHost('ALPHA', 'vendor.example', '/'),
+      fromHost('ALPHA', 'blog.vendor.example', '/post'),
+      fromHost('GAMMA', 'independent.example', '/x'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      maxPerDomain: 1,
+    });
+
+    expect(new URL(report.results[1]!.result.url).host).toBe('independent.example');
+    expect(report.stats.demotedByDomain).toBe(1);
+  });
+
+  it('is disabled by maxPerDomain 0', async () => {
+    const h = harness([
+      fromHost('ALPHA', 'loud.example', '/a'),
+      fromHost('ALPHA', 'loud.example', '/b'),
+      fromHost('GAMMA', 'quiet.example', '/one'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      maxPerDomain: 0,
+    });
+
+    const hosts = report.results.map((r) => new URL(r.result.url).host);
+    expect(hosts).toEqual(['loud.example', 'loud.example', 'quiet.example']);
+    expect(report.stats.demotedByDomain).toBe(0);
+  });
+
+  it('keeps rankDelta describing the order actually returned', async () => {
+    // Demotion reorders the list, so a rankDelta computed before the cap would
+    // point at a ranking that no longer exists.
+    const h = harness([
+      fromHost('ALPHA', 'loud.example', '/a'),
+      fromHost('ALPHA', 'loud.example', '/b'),
+      fromHost('GAMMA', 'quiet.example', '/one'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      dedupe: false,
+      maxPerDomain: 1,
+    });
+
+    report.results.forEach((entry, index) => {
+      expect(entry.rankDelta).toBe(entry.originalRank - index);
+    });
+  });
+});

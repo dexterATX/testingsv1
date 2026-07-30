@@ -19,7 +19,7 @@ import { safeEmitter, type ResearchEventHandler } from './events.js';
 import { collapseNearDuplicates } from './dedupe.js';
 import { centroid, cosineSimilarity } from './similarity.js';
 import { thresholdsFor } from './thresholds.js';
-import { canonicalizeUrl, resultToEmbedText, type EmbedTextOptions } from './text.js';
+import { canonicalizeUrl, hostOf, resultToEmbedText, type EmbedTextOptions } from './text.js';
 
 export interface ResearchOptions {
   /** The research question. Used for both retrieval and re-scoring. */
@@ -67,6 +67,15 @@ export interface ResearchOptions {
    * that over a literal here, since the right number moves with the model.
    */
   dedupeThreshold?: number;
+  /**
+   * Most results one publisher may occupy before the rest are demoted below
+   * other publishers. Defaults to 3; `0` disables the cap.
+   *
+   * Content dedupe cannot catch this — three different pages from one vendor
+   * are genuinely different pages, they are just one voice. See the note at
+   * the call site.
+   */
+  maxPerDomain?: number;
   /** Group surviving results into themes. Pass `true` for defaults. */
   cluster?: boolean | ClusterOptions;
   /** Drop results scoring below this against the query. */
@@ -136,6 +145,8 @@ export interface ResearchReport {
     chunks: number;
     /** Results absorbed into a near-duplicate group. */
     nearDuplicates: number;
+    /** Results pushed below other publishers by the per-domain cap. */
+    demotedByDomain: number;
     /** Dropped by `minScore`. */
     belowThreshold: number;
     dim: number;
@@ -150,6 +161,11 @@ export interface ResearchReport {
 }
 
 const DEFAULT_NUM_RESULTS = 25;
+/**
+ * Permissive on purpose. High enough that a genuinely authoritative site keeps
+ * its place, low enough that a vendor cannot supply a third of a comparison.
+ */
+const DEFAULT_MAX_PER_DOMAIN = 3;
 /** Chunking wants whole pages, so it asks Exa for more text per result. */
 const CHUNKED_EMBED_MAX_CHARS = 24_000;
 
@@ -168,6 +184,7 @@ function emptyReport(
       embedded: 0,
       chunks: 0,
       nearDuplicates: 0,
+      demotedByDomain: 0,
       belowThreshold: 0,
       dim: 0,
       model: '',
@@ -207,6 +224,7 @@ export async function researchSearch(
     extraSearches = [],
     dedupe = true,
     dedupeThreshold,
+    maxPerDomain = DEFAULT_MAX_PER_DOMAIN,
     cluster = false,
     minScore,
     topK,
@@ -457,6 +475,49 @@ export async function researchSearch(
 
   emit({ type: 'dedupe:near', collapsed: nearDuplicates, kept: survivors.length });
 
+  /*
+   * Cap how much of the list any one publisher can occupy.
+   *
+   * Near-duplicate dedupe compares *content*, so three distinct pages from one
+   * vendor survive it — they are not restatements of each other, they are one
+   * voice repeated. On a comparison question that is a real distortion: the
+   * site that publishes the most pages wins, and a measured run handed three
+   * of ten sources to a single vendor whose own product was under comparison.
+   *
+   * Demote rather than drop. A capped result keeps its place in the report,
+   * just below everything from a publisher that has not had its say yet, so a
+   * generous `topK` still returns it and nothing is silently lost.
+   *
+   * This is a trade, not a free win: where one site genuinely is the authority
+   * — an API's own documentation — capping it costs relevance. Hence a
+   * permissive default, and 0 to switch it off.
+   */
+  let demotedByDomain = 0;
+  if (maxPerDomain > 0 && survivors.length > 0) {
+    const seenPerHost = new Map<string, number>();
+    const kept: typeof survivors = [];
+    const demoted: typeof survivors = [];
+
+    for (const entry of survivors) {
+      const host = hostOf(entry.ranked.result.url);
+      const seen = seenPerHost.get(host) ?? 0;
+      seenPerHost.set(host, seen + 1);
+
+      if (seen < maxPerDomain) kept.push(entry);
+      else demoted.push(entry);
+    }
+
+    demotedByDomain = demoted.length;
+    // Demoted entries keep their relative order among themselves.
+    survivors = [...kept, ...demoted];
+
+    // `rankDelta` was computed against the pre-cap order, so recompute it or
+    // the UI's ↑/↓ arrows describe a ranking that no longer exists.
+    survivors.forEach((entry, index) => {
+      entry.ranked.rankDelta = entry.ranked.originalRank - index;
+    });
+  }
+
   const beforeThreshold = survivors.length;
   if (minScore !== undefined) {
     survivors = survivors.filter((entry) => entry.ranked.score >= minScore);
@@ -534,6 +595,7 @@ export async function researchSearch(
       embedded: passages.length + 1,
       chunks: passages.length,
       nearDuplicates,
+      demotedByDomain,
       belowThreshold,
       dim: embedResult.dim,
       model: embedResult.model,

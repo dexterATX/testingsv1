@@ -31,6 +31,7 @@ function makeReport(results: RankedResult[], query = 'the research question'): R
       embedded: results.length + 1,
       chunks: results.length,
       nearDuplicates: 0,
+      demotedByDomain: 0,
       belowThreshold: 0,
       dim: 1024,
       model: 'qwen3-native-28l',

@@ -87,3 +87,42 @@ export function canonicalizeUrl(rawUrl: string): string {
 
   return `${host}${path}${query ? `?${query}` : ''}`.toLowerCase();
 }
+
+/**
+ * The publisher behind a URL, for diversity capping.
+ *
+ * Deliberately the registrable-ish host rather than the full origin: a vendor
+ * publishing from `example.com`, `www.example.com` and `blog.example.com` is
+ * one voice, and capping per-origin would let it take three slots anyway.
+ *
+ * Subdomains are folded into the last two labels, which is wrong for
+ * `co.uk`-style suffixes — `bbc.co.uk` and `itv.co.uk` both reduce to `co.uk`
+ * and would be capped as one publisher. The public-suffix list is the correct
+ * fix and a dependency this library does not have, so the compound suffixes
+ * common enough to matter are special-cased instead.
+ */
+const COMPOUND_SUFFIXES = new Set([
+  'co.uk', 'ac.uk', 'gov.uk', 'org.uk', 'co.jp', 'co.nz', 'co.za', 'co.in',
+  'com.au', 'com.br', 'com.cn', 'com.mx', 'com.tr', 'net.au', 'org.au',
+]);
+
+export function hostOf(rawUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(rawUrl).host;
+  } catch {
+    // Not a URL we can parse — treat the whole string as its own publisher so
+    // unparseable entries never collapse together under one cap.
+    return rawUrl.trim().toLowerCase();
+  }
+
+  host = host.replace(/^www\./i, '').replace(/:\d+$/, '').toLowerCase();
+
+  const labels = host.split('.');
+  if (labels.length <= 2) return host;
+
+  const lastTwo = labels.slice(-2).join('.');
+  const keep = COMPOUND_SUFFIXES.has(lastTwo) ? 3 : 2;
+
+  return labels.slice(-keep).join('.');
+}
