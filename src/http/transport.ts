@@ -54,8 +54,24 @@ export interface RequestConfig extends RequestOverrides {
   stream?: boolean;
 }
 
-export const DEFAULT_MAX_RETRIES = 2;
-export const DEFAULT_RETRY_BASE_MS = 500;
+/*
+ * Retry budget.
+ *
+ * These were 2 and 500 ms, which spends the entire budget in about a second
+ * and a half — two sleeps of roughly 0.5 s and 1 s. That is enough for a
+ * dropped connection and nowhere near enough for the failure actually seen in
+ * practice: an embeddings backend under load returning `502` from its edge for
+ * tens of seconds at a stretch. Every one of those runs died with paid work
+ * already done, because the client stopped asking before the service had any
+ * chance to recover.
+ *
+ * 4 and 1000 ms gives sleeps of ~0.5-1, 1-2, 2-4 and 4-8 seconds: 7.5-15 s of
+ * patience across five attempts. Retries only ever cost time on a request that
+ * was failing anyway, so the ceiling is generous on purpose. `MAX_RETRY_DELAY_MS`
+ * still caps any single wait, including a `Retry-After` the server sends.
+ */
+export const DEFAULT_MAX_RETRIES = 4;
+export const DEFAULT_RETRY_BASE_MS = 1_000;
 export const MAX_RETRY_DELAY_MS = 20_000;
 
 function defaultSleep(ms: number): Promise<void> {

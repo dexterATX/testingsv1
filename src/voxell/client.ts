@@ -73,13 +73,20 @@ export interface VoxellClientOptions {
   model?: EmbedModelName;
   /** Texts per HTTP request. Defaults to 128. */
   batchSize?: number;
+  /**
+   * Characters per HTTP request. Defaults to 64,000, a quarter of what the API
+   * accepts — see `LIMITS.targetCharsPerBatch` for why aiming at the ceiling
+   * is what made requests slow enough to be killed by the edge. Clamped to the
+   * ceiling, so a caller cannot raise it into a guaranteed 413.
+   */
+  maxCharsPerBatch?: number;
   /** Batches in flight at once. Defaults to 2 — the API serialises, see below. */
   concurrency?: number;
   /** Per-request timeout in ms. Defaults to 120000. */
   timeoutMs?: number;
-  /** Retries on 429 / 5xx / network errors. Defaults to 2. */
+  /** Retries on 429 / 5xx / network errors. Defaults to 4. */
   maxRetries?: number;
-  /** Base delay for exponential backoff, in ms. Defaults to 500. */
+  /** Base delay for exponential backoff, in ms. Defaults to 1000. */
   retryBaseMs?: number;
   /** Extra headers sent with every request. */
   headers?: Record<string, string>;
@@ -113,6 +120,8 @@ export interface EmbedOptions extends RequestOverrides {
   model?: EmbedModelName;
   /** Overrides the client's batch size for this call. */
   batchSize?: number;
+  /** Overrides the client's per-request character budget for this call. */
+  maxCharsPerBatch?: number;
 }
 
 /** Clips to `maxChars` without leaving a dangling surrogate half. */
@@ -158,6 +167,7 @@ export class VoxellClient {
   private readonly transport: HttpTransport;
   private readonly defaultModel: EmbedModelName;
   private readonly batchSize: number;
+  private readonly maxCharsPerBatch: number;
   private readonly concurrency: number;
   private readonly onOversizedText: 'error' | 'truncate';
   private readonly store: VectorStore | undefined;
@@ -186,6 +196,7 @@ export class VoxellClient {
 
     this.defaultModel = options.model ?? process.env['VOXELL_MODEL'] ?? DEFAULT_EMBED_MODEL;
     this.batchSize = options.batchSize ?? LIMITS.defaultBatchSize;
+    this.maxCharsPerBatch = options.maxCharsPerBatch ?? LIMITS.targetCharsPerBatch;
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.onOversizedText = options.onOversizedText ?? 'error';
     this.store =
@@ -283,9 +294,18 @@ export class VoxellClient {
      * over. Splitting on count alone produces a 413 that reads like an
      * oversized *document* when the documents are all individually fine.
      *
+     * The split targets `targetCharsPerBatch`, not the ceiling — see the note
+     * there. Batching right up to what the API accepts produced requests slow
+     * enough for the edge to time out and return a 502.
+     *
      * A single text can never overflow a batch on its own, because
-     * `maxCharsPerText` (32,000) is well under `maxCharsPerBatch`.
+     * `maxCharsPerText` (32,000) is well under either figure.
      */
+    const charsPerBatch = Math.min(
+      options.maxCharsPerBatch ?? this.maxCharsPerBatch,
+      LIMITS.maxCharsPerBatch,
+    );
+
     const batches: number[][] = [];
     let current: number[] = [];
     let currentChars = 0;
@@ -295,7 +315,7 @@ export class VoxellClient {
 
       if (
         current.length > 0 &&
-        (current.length >= batchSize || currentChars + length > LIMITS.maxCharsPerBatch)
+        (current.length >= batchSize || currentChars + length > charsPerBatch)
       ) {
         batches.push(current);
         current = [];

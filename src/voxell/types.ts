@@ -76,6 +76,22 @@ export const LIMITS = {
    */
   maxCharsPerBatch: 256_000,
   /**
+   * What the client actually aims for, well under the ceiling above.
+   *
+   * The ceiling is what the API *rejects*, not what it serves comfortably. A
+   * request at 256,000 characters was measured at 51.6 s, and a request that
+   * takes the better part of a minute is exactly what an edge proxy gives up
+   * on — the observed failure is `502` with a body of `error code: 502`, which
+   * is the edge's own format, not the service's.
+   *
+   * A quarter of the ceiling puts a request in the low tens of seconds. This
+   * is not slower overall: it is the *same* characters in more, smaller
+   * requests, which keeps the concurrency window full instead of ending a run
+   * waiting on one straggler. It also shrinks the blast radius — a failure
+   * loses a quarter as much paid work.
+   */
+  targetCharsPerBatch: 64_000,
+  /**
    * Not an API-enforced ceiling — 512 was verified working in ~3.7 s. The
    * client batches at this size by default to bound per-request latency.
    */

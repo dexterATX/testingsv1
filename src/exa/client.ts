@@ -50,9 +50,9 @@ export interface ExaClientOptions {
    * reason to — the defaults already account for deep-search latency.
    */
   timeoutMs?: number;
-  /** Retries on 429 and 5xx responses and network errors. Defaults to 2. */
+  /** Retries on 429 and 5xx responses and network errors. Defaults to 4. */
   maxRetries?: number;
-  /** Base delay for exponential backoff, in ms. Defaults to 500. */
+  /** Base delay for exponential backoff, in ms. Defaults to 1000. */
   retryBaseMs?: number;
   /** Extra headers sent with every request. */
   headers?: Record<string, string>;

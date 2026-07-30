@@ -588,12 +588,32 @@ EXA_LIVE_TEST=1 npm run test:live
 | `pro` | 2560 | ~59 ms |
 | `ultra-4k` | 4096 | ~98 ms |
 
-- **Batches automatically** (128/request, 4 concurrent), reassembles in order
+- **Batches automatically** — 128 texts *or* 64,000 characters per request,
+  2 in flight — and reassembles in order
 - **Embeds repeated text once** per request and fans the vector back out
 - **Vectors are L2-normalized**, so cosine similarity is a dot product
 - **Rejects blank strings** before sending — Voxell answers those with a 502
 - **Rejects text over 32,000 characters**, or clips it with
   `{ onOversizedText: 'truncate' }`
+
+**On batch size and 502s.** The API rejects a request over 256,000 characters
+with a 413, so that number reads like the right target. It is not. A request at
+the ceiling was measured at **51.6 s**, and a request that takes the better part
+of a minute is what an edge proxy gives up on — the observed failure is `502`
+with a body of `error code: 502`, which is the edge's own format rather than
+the service's. Five runs died that way in a single afternoon.
+
+The client aims at a quarter of the ceiling instead. This is not slower: it is
+the same characters in more, smaller requests, which keeps the concurrency
+window full rather than ending a run waiting on one straggler, and it makes a
+failure cost a quarter as much paid work. `maxCharsPerBatch` raises it, clamped
+to what the API will actually accept.
+
+The retry budget matters just as much. It was two attempts at a 500 ms base —
+about a second and a half of patience — which is fine for a dropped connection
+and useless against a backend that is overloaded for tens of seconds. It is now
+four retries at a 1 s base with jitter: roughly 7.5–15 s across five attempts.
+Retries only ever cost time on a request that was failing anyway.
 
 Voxell publishes no reference docs, so every shape and limit was measured
 against the live API. **[docs/voxell-api-reference.md](docs/voxell-api-reference.md)**

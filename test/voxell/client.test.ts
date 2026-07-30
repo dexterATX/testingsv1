@@ -388,6 +388,49 @@ describe('VoxellError', () => {
   });
 });
 
+describe('riding out an overloaded backend', () => {
+  it('keeps asking long enough for a 502 storm to pass', async () => {
+    // The real failure: the embeddings edge returned `502` for tens of seconds
+    // at a stretch. The old budget was two retries at a 500ms base — about a
+    // second and a half of patience — so every run died with paid work already
+    // done. Five attempts is what makes the difference; the sleeps between
+    // them are stubbed out here, the count is the behaviour.
+    const stub = embedStub({
+      overrides: Array.from({ length: 4 }, () => new Response('error code: 502\n', { status: 502 })),
+    });
+
+    const result = await makeClient(stub).embed(['survives the storm']);
+
+    expect(result.embeddings).toHaveLength(1);
+    expect(stub.calls).toHaveLength(5);
+  });
+
+  it('waits between attempts rather than hammering a service that is already down', async () => {
+    const waits: number[] = [];
+    const stub = embedStub({
+      overrides: Array.from({ length: 8 }, () => new Response('error code: 502\n', { status: 502 })),
+    });
+
+    const client = new VoxellClient({
+      apiKey: API_KEY,
+      fetch: stub.fetch,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    await expect(client.embed(['never succeeds'])).rejects.toThrow();
+
+    // Backing off is the whole point: retrying an overloaded backend
+    // immediately is what keeps it overloaded.
+    expect(waits).toHaveLength(4);
+    expect(waits.reduce((a, b) => a + b, 0)).toBeGreaterThan(5_000);
+    for (let i = 1; i < waits.length; i += 1) {
+      expect(waits[i]!).toBeGreaterThan(waits[i - 1]!);
+    }
+  });
+});
+
 describe('batching by total characters', () => {
   it('splits on the character ceiling, not just the count', async () => {
     const stub = embedStub();
@@ -402,6 +445,37 @@ describe('batching by total characters', () => {
       const chars = call.body.texts!.reduce((n: number, t: string) => n + t.length, 0);
       expect(chars).toBeLessThanOrEqual(256_000);
     }
+  });
+
+  it('aims well under the ceiling, so a request cannot get slow enough to be killed', async () => {
+    const stub = embedStub();
+    // 400k characters. Against the 256k ceiling that is two requests, the
+    // larger measured at 51.6s — long enough for the edge to time out and
+    // return a 502, which is the failure this default exists to avoid.
+    const texts = Array.from({ length: 40 }, (_, i) => `${'x'.repeat(9_990)}${String(i).padStart(10, '0')}`);
+
+    await makeClient(stub, { batchSize: 128 }).embed(texts);
+
+    for (const call of stub.calls) {
+      const chars = call.body.texts!.reduce((n: number, t: string) => n + t.length, 0);
+      expect(chars).toBeLessThanOrEqual(64_000);
+    }
+    expect(stub.calls.length).toBeGreaterThanOrEqual(7);
+  });
+
+  it('lets a caller widen the budget, but never past what the API accepts', async () => {
+    const stub = embedStub();
+    const texts = Array.from({ length: 60 }, (_, i) => `${'x'.repeat(9_990)}${String(i).padStart(10, '0')}`);
+
+    // 600k requested; the API rejects anything over 256k with a 413, so asking
+    // for more must clamp rather than guarantee a failure.
+    await makeClient(stub, { batchSize: 128, maxCharsPerBatch: 600_000 }).embed(texts);
+
+    for (const call of stub.calls) {
+      const chars = call.body.texts!.reduce((n: number, t: string) => n + t.length, 0);
+      expect(chars).toBeLessThanOrEqual(256_000);
+    }
+    expect(stub.calls.length).toBeGreaterThan(1);
   });
 
   it('still honours the count limit when the texts are short', async () => {

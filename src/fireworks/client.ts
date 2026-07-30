@@ -48,9 +48,9 @@ export interface FireworksClientOptions {
   maxTokens?: number;
   /** Per-request timeout in ms. Defaults to 300000. */
   timeoutMs?: number;
-  /** Retries on 429 / 5xx / network errors. Defaults to 2. */
+  /** Retries on 429 / 5xx / network errors. Defaults to 4. */
   maxRetries?: number;
-  /** Base delay for exponential backoff, in ms. Defaults to 500. */
+  /** Base delay for exponential backoff, in ms. Defaults to 1000. */
   retryBaseMs?: number;
   /** Extra headers sent with every request. */
   headers?: Record<string, string>;
