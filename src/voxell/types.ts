@@ -60,6 +60,18 @@ export const LIMITS = {
   /** Roughly what `maxCharsPerText` corresponds to, per the 413 message. */
   maxTokensPerText: 8192,
   /**
+   * Total characters across every text in one request.
+   *
+   * Undocumented and separate from the per-text ceiling: exceeding it returns
+   * `413 Total batch size exceeds maximum (max 256000 chars across all
+   * inputs)`. Measured inclusive — 256,000 succeeds, 260,000 does not.
+   *
+   * This binds long before `defaultBatchSize` does. A batch of 128 results at
+   * the 8,000 characters `resultToEmbedText` allows is 1,024,000 characters,
+   * four times over, so batching by count alone is not enough.
+   */
+  maxCharsPerBatch: 256_000,
+  /**
    * Not an API-enforced ceiling — 512 was verified working in ~3.7 s. The
    * client batches at this size by default to bound per-request latency.
    */

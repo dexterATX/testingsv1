@@ -35,7 +35,7 @@ pipeline, and the vector stores have **no runtime dependencies** — just Node
 ```bash
 cp .env.example .env     # EXA_API_KEY, VOXELL_API_KEY, + ANTHROPIC_API_KEY or FIREWORKS_API_KEY
 npm install
-npm run check            # typecheck + 387 tests, no network, no keys needed
+npm run check            # typecheck + 402 tests, no network, no keys needed
 ```
 
 Then either the web UI:
@@ -171,7 +171,8 @@ What it does, in order:
 
 | Option | Default | Notes |
 |---|---|---|
-| `numResults` | 25 | Passed to Exa |
+| `numResults` | 25 | Passed to Exa. Capped by your plan — 100 on the measured account |
+| `extraSearches` | `[]` | More searches, merged before ranking. The only way past the per-request cap |
 | `search` | `{}` | Any `SearchOptions`, merged over the defaults |
 | `model` | `ultra-4k` | `turbo` (free) / `pro` / `ultra-4k`; or set `VOXELL_MODEL` |
 | `chunk` | `false` | `true`, or `{ maxChars, overlapChars, minChars }` |
@@ -198,6 +199,49 @@ await researchSearch(exa, voxell, {
 ```
 
 A throwing handler is swallowed: a broken progress listener never fails the run.
+
+### Getting more results than one search returns
+
+Exa caps `numResults` at whatever your plan allows — **100** on the measured
+account, with `NUM_RESULTS_EXCEEDED` above it — and there is **no pagination**.
+`offset`, `page`, `cursor` and friends are accepted and silently ignored,
+returning the identical window every time. Verified: offsets 0, 10 and 50 give
+the same three URLs.
+
+So the only way to widen recall is more searches, which `extraSearches` merges
+into one run:
+
+```ts
+await researchSearch(exa, voxell, {
+  query: 'how are teams evaluating RAG retrieval quality?',
+  numResults: 50,
+  extraSearches: [
+    { query: 'measuring retriever precision in production RAG' },
+    { query: 'RAG evaluation metrics: recall@k, MRR, golden datasets' },
+    { startPublishedDate: '2024-01-01T00:00:00.000Z',
+      endPublishedDate:   '2025-06-01T00:00:00.000Z' },
+  ],
+});
+```
+
+Measured yield on one question, 50 results per search:
+
+| Strategy | Raw | Unique | Overlap |
+|---|---|---|---|
+| 5 paraphrases | 250 | 211 | 16% |
+| 3 disjoint date windows | 150 | 150 | **0%** |
+
+Overlap costs nothing past the search itself — exact-URL dedupe runs before
+anything is embedded — and **ranking stays anchored to the original `query`**,
+so a paraphrase widens the net without steering the order. End to end, a 4-way
+fan-out took one question from 50 results to 170, put two entries in the top
+ten that the single search never saw, and left the top score unchanged.
+
+The web UI exposes this as *Also search for*, one query per line.
+
+Note that the deep search types go the other way: `deep` and `deep-lite`
+returned 14 and 16 results against `fast`/`instant`'s 100. They do agentic
+multi-step research, not broad retrieval.
 
 ### Chunking
 
@@ -469,7 +513,7 @@ src/
   server/             local HTTP server + SSE progress stream
 web/                  the UI (plain HTML/CSS/JS, no build step)
 test/
-  exa/ voxell/ fireworks/ server/ store/ …   387 tests — no network, no keys
+  exa/ voxell/ fireworks/ server/ store/ …   402 tests — no network, no keys
   live/                                       57 tests — opt-in, real APIs
 examples/             one runnable script per pattern
 docs/                 measured API references
@@ -480,7 +524,7 @@ docs/                 measured API references
 | Command | Description |
 |---|---|
 | `npm run check` | Typecheck and test |
-| `npm test` | Offline suite (387 tests) |
+| `npm test` | Offline suite (402 tests) |
 | `npm run test:live` | Live API tests — reads `.env`; gated per provider by `EXA_LIVE_TEST` / `VOXELL_LIVE_TEST` / `FIREWORKS_LIVE_TEST` |
 | `npm run web` | **Local research UI** on http://127.0.0.1:4317 |
 | `npm run build` | Compile to `dist/` |

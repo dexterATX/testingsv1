@@ -238,3 +238,35 @@ describe('http server', () => {
     }
   });
 });
+
+describe('parseRunRequest extraQueries', () => {
+  it('accepts extra queries and trims them', () => {
+    const config = parseRunRequest({ query: 'main', extraQueries: ['  second  ', 'third'] });
+
+    expect(config.extraQueries).toEqual(['second', 'third']);
+  });
+
+  it('drops blanks, non-strings, and a repeat of the main query', () => {
+    const config = parseRunRequest({
+      query: 'main',
+      extraQueries: ['', '   ', 'main', 42, null, 'real'],
+    });
+
+    // Re-running the identical search would only pay twice for the same hits.
+    expect(config.extraQueries).toEqual(['real']);
+  });
+
+  it('caps the fan-out, because each entry is another paid search', () => {
+    const many = Array.from({ length: 20 }, (_, i) => `query ${i}`);
+    const config = parseRunRequest({ query: 'main', extraQueries: many });
+
+    expect(config.extraQueries).toHaveLength(8);
+  });
+
+  it('defaults to none when the field is absent or malformed', () => {
+    expect(parseRunRequest({ query: 'main' }).extraQueries).toEqual([]);
+    expect(parseRunRequest({ query: 'main', extraQueries: 'not an array' }).extraQueries).toEqual(
+      [],
+    );
+  });
+});

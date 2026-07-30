@@ -52,6 +52,7 @@ interface RunRequest {
   synthesize?: unknown;
   /** An opaque id from `/api/config`, never a provider name. */
   writer?: unknown;
+  extraQueries?: unknown;
   searchType?: unknown;
 }
 
@@ -66,6 +67,7 @@ interface RunConfig {
   synthesize: boolean;
   provider: Provider | undefined;
   searchType: string | undefined;
+  extraQueries: string[];
 }
 
 /** Writer id shown to the page, per provider. */
@@ -146,6 +148,17 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
   const provider =
     typeof raw.writer === 'string' ? PROVIDER_BY_WRITER_ID.get(raw.writer) : undefined;
 
+  /*
+   * Each extra query is another Exa search merged into the same run. Capped
+   * because every one costs a search and the results all have to be embedded;
+   * eight is already 8x the spend of a plain run.
+   */
+  const extraQueries = (Array.isArray(raw.extraQueries) ? raw.extraQueries : [])
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '' && entry !== query)
+    .slice(0, 8);
+
   return {
     query,
     numResults,
@@ -155,6 +168,7 @@ export function parseRunRequest(raw: RunRequest): RunConfig {
     synthesize: raw.synthesize === true,
     provider,
     searchType: typeof raw.searchType === 'string' ? raw.searchType : undefined,
+    extraQueries,
   };
 }
 
@@ -297,6 +311,9 @@ async function handleRun(
       chunk: config.chunk,
       cluster: config.cluster,
       ...(config.topK !== undefined ? { topK: config.topK } : {}),
+      ...(config.extraQueries.length > 0
+        ? { extraSearches: config.extraQueries.map((extra) => ({ query: extra })) }
+        : {}),
       ...(config.searchType ? { search: { type: config.searchType as never } } : {}),
       onEvent: (event: ResearchEvent) => send(publicEvent(event)),
       signal: controller.signal,

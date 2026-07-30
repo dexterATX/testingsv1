@@ -18,6 +18,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   form: $('run-form'),
   query: $('query'),
+  extraQueries: $('extraQueries'),
   numResults: $('numResults'),
   topK: $('topK'),
   searchType: $('searchType'),
@@ -464,6 +465,7 @@ el.form.addEventListener('submit', (event) => {
     numResults: Number(el.numResults.value),
     topK: Number.isFinite(topK) && topK > 0 ? topK : undefined,
     searchType: el.searchType.value || undefined,
+    extraQueries: el.extraQueries.value.split('\n').map((line) => line.trim()).filter(Boolean),
     chunk: el.chunk.checked,
     cluster: el.cluster.checked,
     synthesize: el.synthesize.checked,

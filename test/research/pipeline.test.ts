@@ -520,3 +520,88 @@ describe('researchSearch with clustering', () => {
     }
   });
 });
+
+describe('researchSearch with extraSearches', () => {
+  it('merges several searches and dedupes the overlap by URL', async () => {
+    const h = harness([
+      makeResult('ALPHA', 'https://example.com/alpha'),
+      makeResult('GAMMA', 'https://example.com/gamma'),
+    ]);
+
+    // The stub answers every search identically, so all three searches return
+    // the same two URLs — the worst case for overlap.
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      extraSearches: [{ query: 'a paraphrase' }, { query: 'another paraphrase' }],
+      dedupe: false,
+    });
+
+    expect(h.searchBodies).toHaveLength(3);
+    expect(report.stats.retrieved).toBe(6);
+    expect(report.stats.exactDuplicates).toBe(4);
+    expect(report.results).toHaveLength(2);
+  });
+
+  it('sends each paraphrase as its own query, keeping the base options', async () => {
+    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+
+    await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      search: { category: 'news' },
+      extraSearches: [
+        { query: 'second phrasing' },
+        { startPublishedDate: '2025-01-01T00:00:00.000Z' },
+      ],
+    });
+
+    expect(h.searchBodies.map((b) => b['query'])).toEqual([
+      QUERY,
+      'second phrasing',
+      // A window slice reuses the base query — only the dates differ.
+      QUERY,
+    ]);
+    // Base options survive on every leg.
+    expect(h.searchBodies.every((b) => b['category'] === 'news')).toBe(true);
+    expect(h.searchBodies[2]!['startPublishedDate']).toBe('2025-01-01T00:00:00.000Z');
+  });
+
+  it('ranks against the original query, not the paraphrases', async () => {
+    // The whole point of merging rather than concatenating: a paraphrase may
+    // widen recall, but it must not steer the ordering toward its own wording.
+    const h = harness([
+      makeResult('GAMMA', 'https://example.com/gamma'),
+      makeResult('ALPHA', 'https://example.com/alpha'),
+    ]);
+
+    const report = await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      extraSearches: [{ query: 'DELTA phrasing' }],
+      dedupe: false,
+    });
+
+    // ALPHA is the query direction, so it still wins despite arriving second.
+    expect(report.results[0]!.result.title).toBe('ALPHA');
+    expect(report.results[0]!.score).toBeCloseTo(1, 6);
+  });
+
+  it('runs the searches concurrently rather than in series', async () => {
+    const h = harness([makeResult('ALPHA', 'https://example.com/alpha')]);
+
+    const started: number[] = [];
+    const original = h.exa.search.bind(h.exa);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.exa as any).search = async (...args: unknown[]) => {
+      started.push(Date.now());
+      return original(...(args as Parameters<typeof original>));
+    };
+
+    await researchSearch(h.exa, h.voxell, {
+      query: QUERY,
+      extraSearches: [{ query: 'b' }, { query: 'c' }],
+    });
+
+    expect(started).toHaveLength(3);
+    // All three dispatched in the same tick; serial would space them out.
+    expect(Math.max(...started) - Math.min(...started)).toBeLessThan(50);
+  });
+});

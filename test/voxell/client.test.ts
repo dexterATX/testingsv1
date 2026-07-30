@@ -387,3 +387,55 @@ describe('VoxellError', () => {
     return expect(makeClient(stub).embed(['x'])).rejects.toBeInstanceOf(VoxellError);
   });
 });
+
+describe('batching by total characters', () => {
+  it('splits on the character ceiling, not just the count', async () => {
+    const stub = embedStub();
+    // 40 texts of 10k chars = 400k, over the 256k ceiling but only 40 items,
+    // so a count-only batcher would send them as one request and get a 413.
+    const texts = Array.from({ length: 40 }, (_, i) => `${'x'.repeat(9_990)}${String(i).padStart(10, '0')}`);
+
+    await makeClient(stub, { batchSize: 128 }).embed(texts);
+
+    expect(stub.calls.length).toBeGreaterThan(1);
+    for (const call of stub.calls) {
+      const chars = call.body.texts!.reduce((n: number, t: string) => n + t.length, 0);
+      expect(chars).toBeLessThanOrEqual(256_000);
+    }
+  });
+
+  it('still honours the count limit when the texts are short', async () => {
+    const stub = embedStub();
+    const texts = Array.from({ length: 250 }, (_, i) => `short ${i}`);
+
+    await makeClient(stub, { batchSize: 100 }).embed(texts);
+
+    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls.map((c) => c.body.texts!.length)).toEqual([100, 100, 50]);
+  });
+
+  it('never strands a text that is itself under the per-text limit', async () => {
+    const stub = embedStub();
+    // Each is 30k — legal alone, and three of them exceed the batch ceiling.
+    const texts = Array.from({ length: 12 }, (_, i) => `${'y'.repeat(29_990)}${String(i).padStart(10, '0')}`);
+
+    const result = await makeClient(stub).embed(texts);
+
+    expect(result.embeddings).toHaveLength(12);
+    for (const call of stub.calls) {
+      expect(call.body.texts!.length).toBeGreaterThan(0);
+      const chars = call.body.texts!.reduce((n: number, t: string) => n + t.length, 0);
+      expect(chars).toBeLessThanOrEqual(256_000);
+    }
+  });
+
+  it('preserves input order across character-split batches', async () => {
+    const stub = embedStub();
+    const texts = Array.from({ length: 30 }, (_, i) => `${'z'.repeat(9_990)}${String(i).padStart(10, '0')}`);
+
+    const result = await makeClient(stub).embed(texts);
+
+    // `map(fakeVector)` would hand it the index as a second argument.
+    expect(result.embeddings).toEqual(texts.map((t) => fakeVector(t)));
+  });
+});

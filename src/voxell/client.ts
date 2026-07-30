@@ -240,10 +240,39 @@ export class VoxellClient {
       }
     }
 
+    /*
+     * Batch by characters as well as by count.
+     *
+     * The API caps total characters per request at `maxCharsPerBatch`, which
+     * is a separate limit from the per-text one and binds far sooner: 128
+     * results at the 8,000 characters `resultToEmbedText` allows is four times
+     * over. Splitting on count alone produces a 413 that reads like an
+     * oversized *document* when the documents are all individually fine.
+     *
+     * A single text can never overflow a batch on its own, because
+     * `maxCharsPerText` (32,000) is well under `maxCharsPerBatch`.
+     */
     const batches: number[][] = [];
-    for (let i = 0; i < misses.length; i += batchSize) {
-      batches.push(misses.slice(i, i + batchSize));
+    let current: number[] = [];
+    let currentChars = 0;
+
+    for (const slot of misses) {
+      const length = (uniqueTexts[slot] as string).length;
+
+      if (
+        current.length > 0 &&
+        (current.length >= batchSize || currentChars + length > LIMITS.maxCharsPerBatch)
+      ) {
+        batches.push(current);
+        current = [];
+        currentChars = 0;
+      }
+
+      current.push(slot);
+      currentChars += length;
     }
+
+    if (current.length > 0) batches.push(current);
 
     const responses = await mapWithConcurrency(batches, this.concurrency, (batch) =>
       this.postEmbed(

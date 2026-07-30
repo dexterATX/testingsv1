@@ -9,7 +9,7 @@
  */
 
 import type { ExaClient } from '../exa/client.js';
-import type { ExaResult, SearchOptions, SearchResponse } from '../exa/types.js';
+import type { CostDollars, ExaResult, SearchOptions, SearchResponse } from '../exa/types.js';
 import type { RequestOverrides } from '../http/transport.js';
 import type { VoxellClient } from '../voxell/client.js';
 import type { EmbedModelName } from '../voxell/types.js';
@@ -28,6 +28,27 @@ export interface ResearchOptions {
   numResults?: number;
   /** Extra Exa search options, merged over the defaults. */
   search?: SearchOptions & RequestOverrides;
+  /**
+   * Additional searches whose results are merged in before ranking.
+   *
+   * Exa caps results per request at the plan ceiling and offers no
+   * pagination, so this is the only way to widen recall. Each entry overrides
+   * the base query and options, which covers both shapes that work:
+   * paraphrase fan-out (a different `query`) and publication-window slicing
+   * (different `startPublishedDate` / `endPublishedDate`).
+   *
+   * Overlap is free — exact-URL dedupe runs before anything is embedded — and
+   * ranking stays anchored to the original `query`, so a paraphrase widens
+   * the net without steering the order.
+   *
+   * @example
+   * extraSearches: [
+   *   { query: 'measuring retriever precision in production RAG' },
+   *   { startPublishedDate: '2025-01-01T00:00:00.000Z',
+   *     endPublishedDate: '2026-01-01T00:00:00.000Z' },
+   * ]
+   */
+  extraSearches?: Array<{ query?: string } & SearchOptions>;
   /** Embedding model. Defaults to the Voxell client's default. */
   model?: EmbedModelName;
   /** How each result is turned into embeddable text. */
@@ -183,6 +204,7 @@ export async function researchSearch(
     model,
     embedText,
     chunk = false,
+    extraSearches = [],
     dedupe = true,
     dedupeThreshold,
     cluster = false,
@@ -215,27 +237,65 @@ export async function researchSearch(
 
   emit({ type: 'search:start', query, numResults });
 
-  const searchResponse = await exa.search(query, {
-    numResults,
-    contents: defaultContents,
-    ...search,
-    ...(signal ? { signal } : {}),
-  });
+  /*
+   * Fan out, then merge.
+   *
+   * Exa caps `numResults` per request at whatever the plan allows — 100 on the
+   * measured account — and has no pagination: `offset` and friends are
+   * silently ignored, returning the same window every time. The only way past
+   * the ceiling is more searches.
+   *
+   * Two things make merging safe here rather than merely more results.
+   * Exact-URL dedupe runs immediately below, so overlap costs nothing beyond
+   * the search itself; and ranking scores everything against the *original*
+   * query, so a paraphrase can widen recall without dragging the ordering
+   * toward its own phrasing.
+   *
+   * Measured yield on one question: five paraphrases at 50 each returned 211
+   * unique of 250 (16% overlap), and three disjoint publication windows
+   * returned 150 of 150 (no overlap at all, by construction).
+   */
+  const searchRequests = [
+    { query, options: search },
+    ...extraSearches.map((extra) => {
+      const { query: extraQuery, ...extraOptions } = extra;
+      return { query: extraQuery ?? query, options: { ...search, ...extraOptions } };
+    }),
+  ];
 
-  const retrieved = searchResponse.results.length;
+  const searchResponses = await Promise.all(
+    searchRequests.map((request) =>
+      exa.search(request.query, {
+        numResults,
+        contents: defaultContents,
+        ...request.options,
+        ...(signal ? { signal } : {}),
+      }),
+    ),
+  );
+
+  const searchResponse = searchResponses[0] as SearchResponse;
+  const mergedResults = searchResponses.flatMap((response) => response.results);
+  const retrieved = mergedResults.length;
+
+  const totalCost = searchResponses.reduce<CostDollars | undefined>((accumulated, response) => {
+    if (!response.costDollars) return accumulated;
+    if (!accumulated) return response.costDollars;
+    return { ...accumulated, total: (accumulated.total ?? 0) + (response.costDollars.total ?? 0) };
+  }, undefined);
 
   emit({
     type: 'search:done',
     requestId: searchResponse.requestId,
-    results: searchResponse.results,
-    costDollars: searchResponse.costDollars,
+    results: mergedResults,
+    costDollars: totalCost,
   });
 
   // Exact-URL duplicates first — free, and they would otherwise each cost an
   // embedding only to be collapsed a step later.
   const seenUrls = new Set<string>();
   const unique: ExaResult[] = [];
-  for (const result of searchResponse.results) {
+  for (const result of mergedResults) {
     const key = canonicalizeUrl(result.url);
     if (seenUrls.has(key)) continue;
     seenUrls.add(key);

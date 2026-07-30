@@ -58,8 +58,10 @@ Plans buy throughput, not features: Free 100 req/min, Precision ($20) 600,
 Singularity ($200) 5,000, Enterprise ($500) 10,000. Every model is available on
 the free tier, and production use on it is explicitly permitted.
 
-Since this toolkit defaults to `turbo`, **embeddings cost nothing** — the
-binding constraint is requests per minute, not spend.
+This toolkit defaults to **`ultra-4k`**, which does bill — see
+`src/research/thresholds.ts` for why it earns the cost. `VOXELL_MODEL=turbo`
+switches to the free tier, where the binding constraint is requests per minute
+rather than spend.
 
 ---
 
@@ -144,8 +146,16 @@ the corpus.
 | Limit | Value | Over the limit |
 |-------|-------|----------------|
 | Characters per text | 32,000 | `413 {"error":"Single text exceeds maximum length of ~8192 tokens (max 32000 chars)"}` |
+| **Characters per request, summed** | **256,000** | `413 {"error":"Total batch size exceeds maximum (max 256000 chars across all inputs)"}` |
 | Tokens per text | ~8,192 | same 413 |
 | Texts per request | no ceiling found | 512 verified working in ~3.7 s |
+
+The total-characters limit is separate from the per-text one and binds far
+sooner. Measured inclusive: 256 texts of 1,000 characters (256,000) succeed,
+260,000 does not. It is why `VoxellClient` batches on characters as well as on
+count — 128 texts at the 8,000 characters `resultToEmbedText` allows is
+1,024,000, four times over, and splitting on count alone returns a 413 that
+reads like an oversized *document* when every document is individually fine.
 
 The 32,000-character limit is per *individual text*, not per request. It is the
 same for every model — `ultra-4k` refers to output dimensions, not a longer
